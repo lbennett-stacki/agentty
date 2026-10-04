@@ -1,29 +1,3 @@
-//! agentically's own state: labels, groups and anchors, in `~/.config/agentically/state.toml`.
-//! The only file the app writes.
-//!
-//! Write discipline: several agentically processes can run at once (a persistent window and a
-//! popup). Each commit is reload-if-changed -> apply one idempotent `Op` -> write
-//! `state.toml.tmp-<pid>` -> fsync -> rename over `state.toml`. A reader never sees a torn file
-//! (rename is atomic), and because every op is idempotent and applied to the freshest state, two
-//! processes interleaving commits lose nothing except a sub-millisecond race inside
-//! reload->rename, where the later writer's reload predates the earlier writer's rename
-//! (accepted). Each process reloads on its own doorbell when the file's stamp moves.
-//!
-//! On-disk shape (version 1):
-//! ```toml
-//! version = 1
-//! groups = ["jnj-web", "side quests"]          # display order
-//! [entries."sid:91c784ff-…"]
-//! label = "arch arena"
-//! group = "side quests"
-//! [entries."sid:91c784ff-…".anchor]
-//! dir = "/Users/you/.claude"
-//! pid = 41213
-//! proc_start = "Sun Oct  4 21:17:02 2026"
-//! [entries."job:9b3323e1"]
-//! label = "fees"
-//! ```
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -39,8 +13,6 @@ const VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UserState {
-    /// Display order of user groups. A group exists while it is in this list; `SetGroup` with a
-    /// new name appends. Groups with no live rows are hidden at render time, not deleted.
     pub groups: Vec<GroupName>,
     pub entries: BTreeMap<UserKey, Entry>,
 }
@@ -49,16 +21,10 @@ pub struct UserState {
 pub struct Entry {
     pub label: Option<String>,
     pub group: Option<GroupName>,
-    /// Only on `UserKey::Session` entries. Invariant kept by `apply`: at most one entry holds a
-    /// given anchor (`Rekey` clears it on `from`, `Anchor` clears it everywhere else).
     pub anchor: Option<Anchor>,
 }
 
 impl UserState {
-    /// Apply one op. Returns whether anything changed. Idempotent by construction:
-    /// `apply(op); apply(op)` leaves the same state as one `apply(op)`. An entry with neither
-    /// label nor group is removed (its anchor alone is not worth a table), so the file does not
-    /// accumulate empty entries.
     pub fn apply(&mut self, op: &Op) -> bool {
         let before = self.clone();
         match op {
@@ -101,20 +67,11 @@ impl UserState {
         self.entries.get(key)
     }
 
-    /// Position of a group in display order, for `GroupId::User { order }`.
     pub fn group_order(&self, name: &GroupName) -> Option<u32> {
         self.groups.iter().position(|g| g == name).map(|i| i as u32)
     }
 }
 
-/// Reconcile anchors with what is live. For each live `(anchor, sid)` (from
-/// `Row::live_anchor`):
-/// - an entry at `Session(sid)` whose anchor is not a live holder of `sid` -> `Op::Anchor`
-///   (first labelling, or a process that resumed an old conversation);
-/// - no entry at `Session(sid)` but some entry carries `anchor` -> `Op::Rekey { from, to: sid }`
-///   (the process did `/clear`; the label follows, even if the dashboard was closed then).
-///
-/// Pure; returns an empty vec when nothing changed, so the steady state commits nothing.
 pub fn rebind<'a>(
     state: &UserState,
     live: impl IntoIterator<Item = (Anchor, &'a SessionId)>,
@@ -124,7 +81,6 @@ pub fn rebind<'a>(
     for (anchor, sid) in &live {
         match state.entry(&UserKey::Session((*sid).clone())) {
             Some(e) => {
-                // Two live holders of one sessionId: either anchor is right, so never flip-flop.
                 let held = e
                     .anchor
                     .as_ref()
@@ -178,7 +134,6 @@ struct WireAnchor {
     proc_start: String,
 }
 
-/// Single owner of the file within a process.
 pub struct Store {
     path: PathBuf,
     stamp: Option<FileStamp>,
@@ -186,20 +141,15 @@ pub struct Store {
 }
 
 impl Store {
-    /// Load, or start empty if the file is missing. A corrupt file is moved aside to
-    /// `state.toml.bad-<epoch-ms>` and the app starts empty rather than refusing to run. A file
-    /// from a newer version is an error: an old binary must not rewrite it.
     pub fn load(path: PathBuf) -> anyhow::Result<Store> {
         let (state, stamp) = read_state(&path)?;
         Ok(Store { path, stamp, state })
     }
 
-    /// `~/.config/agentically/state.toml` (XDG-style even on macOS, per SPEC).
     pub fn default_path(home: &Path) -> PathBuf {
         home.join(".config/agentically/state.toml")
     }
 
-    /// Reload if another process replaced the file. Returns whether the state changed.
     pub fn reload_if_changed(&mut self) -> anyhow::Result<bool> {
         if stamp_of(&self.path)? == self.stamp {
             return Ok(false);
@@ -211,8 +161,6 @@ impl Store {
         Ok(changed)
     }
 
-    /// reload_if_changed -> apply -> (if changed) atomic write. No write when the op is a no-op,
-    /// so the steady-state `rebind` stream from several processes does not churn the file.
     pub fn commit(&mut self, op: &Op) -> anyhow::Result<()> {
         self.reload_if_changed()?;
         if !self.state.apply(op) {
@@ -221,7 +169,6 @@ impl Store {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
         }
-        // Per-process tmp name: two instances sharing one tmp file could interleave bytes.
         let tmp = sibling(&self.path, &format!("tmp-{}", std::process::id()));
         let mut f = fs::File::create(&tmp)?;
         f.write_all(encode(&self.state).as_bytes())?;
@@ -240,14 +187,12 @@ impl Store {
     }
 }
 
-/// `state.toml` -> `state.toml.<suffix>`.
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{suffix}"));
     path.with_file_name(name)
 }
 
-/// `None` when the file does not exist.
 fn stamp_of(path: &Path) -> std::io::Result<Option<FileStamp>> {
     match fs::metadata(path) {
         Ok(m) => Ok(Some(FileStamp {
@@ -260,8 +205,6 @@ fn stamp_of(path: &Path) -> std::io::Result<Option<FileStamp>> {
     }
 }
 
-/// The stamp is taken before the read, so a replace racing the read costs one extra reload
-/// later, never a missed one.
 fn read_state(path: &Path) -> anyhow::Result<(UserState, Option<FileStamp>)> {
     let stamp = stamp_of(path)?;
     let text = match fs::read_to_string(path) {
@@ -288,9 +231,6 @@ enum Decode {
     Newer(u32),
 }
 
-/// Pure deserialization, split out for round-trip tests. The version is read on its own first:
-/// a newer file may not fit this build's shape, and it must be refused, not moved aside as
-/// corrupt. Entry keys this build cannot decode are skipped.
 fn decode(text: &str) -> Result<UserState, Decode> {
     let WireVersion { version } = toml::from_str(text).map_err(|_| Decode::Corrupt)?;
     if version > VERSION {
@@ -365,7 +305,6 @@ mod tests {
         Op::SetLabel { key, label: Some(l.into()) }
     }
 
-    /// A unique scratch dir under the system temp dir, removed on drop.
     struct Scratch(PathBuf);
     impl Scratch {
         fn new(name: &str) -> Scratch {
@@ -384,8 +323,6 @@ mod tests {
         }
     }
 
-    // Defect: an op that is not idempotent (duplicate group in `groups`, a second apply that
-    // reports a change and makes every rebind tick rewrite the file).
     #[test]
     fn every_op_applied_twice_equals_once_and_reports_no_second_change() {
         let mut base = UserState::default();
@@ -409,7 +346,6 @@ mod tests {
         }
     }
 
-    // Defect: a new group appended twice, or an existing group re-appended out of order.
     #[test]
     fn set_group_appends_new_names_once_in_first_use_order() {
         let mut s = UserState::default();
@@ -420,7 +356,6 @@ mod tests {
         assert_eq!(s.group_order(&group("y")), Some(1));
     }
 
-    // Defect: entries emptied by clears pile up in the file forever.
     #[test]
     fn an_entry_emptied_by_clears_is_removed() {
         let mut s = UserState::default();
@@ -430,8 +365,6 @@ mod tests {
         assert!(s.entries.is_empty());
     }
 
-    // Defect: Rekey overwriting a label the target already has, or leaving the anchor on both
-    // entries so the next /clear is ambiguous.
     #[test]
     fn rekey_never_overwrites_the_target_and_clears_the_source_anchor() {
         let mut s = UserState::default();
@@ -444,7 +377,6 @@ mod tests {
         assert_eq!(s.entry(&skey("a")).unwrap().label.as_deref(), Some("old"));
     }
 
-    // Defect: one anchor held by two entries after an Anchor op.
     #[test]
     fn anchor_op_takes_the_anchor_from_any_other_entry() {
         let mut s = UserState::default();
@@ -456,8 +388,6 @@ mod tests {
         assert_eq!(s.entry(&skey("b")).unwrap().anchor, Some(anchor(1)));
     }
 
-    // Defect: a label that does not follow `/clear` (new sessionId under the same process),
-    // or a rebind that keeps emitting ops in the steady state.
     #[test]
     fn rebind_carries_a_label_across_clear_then_goes_quiet() {
         let mut s = UserState::default();
@@ -482,8 +412,6 @@ mod tests {
         assert_eq!(rebind(&s, [(anchor(7), &b)]), vec![]);
     }
 
-    // Defect: rebind inventing entries for unlabelled sessions, or flip-flopping the anchor
-    // between two live holders of one sessionId.
     #[test]
     fn rebind_ignores_unlabelled_sessions_and_settles_on_two_holders() {
         let mut s = UserState::default();
@@ -497,7 +425,6 @@ mod tests {
         assert_eq!(rebind(&s, [(anchor(1), &a), (anchor(2), &a)]), vec![]);
     }
 
-    // Defect: anchors, groups or labels lost on a write/read round trip; None written as "".
     #[test]
     fn encode_decode_round_trips_with_anchors() {
         let mut s = UserState::default();
@@ -511,15 +438,12 @@ mod tests {
         assert_eq!(decode(&text), Ok(s));
     }
 
-    // Defect: an old binary treating a newer file as corrupt (moving it aside) because the
-    // newer shape does not parse.
     #[test]
     fn a_newer_version_is_refused_even_when_its_shape_differs() {
         assert_eq!(decode("version = 2\ngroups = 5\n"), Err(Decode::Newer(2)));
         assert_eq!(decode("groups = []\n"), Err(Decode::Corrupt));
     }
 
-    // Defect: a commit that drops what another process committed in between (popup + window).
     #[test]
     fn two_stores_on_one_path_keep_each_others_commits() {
         let dir = Scratch::new("interleave");
@@ -535,7 +459,6 @@ mod tests {
         assert_eq!(fresh.state(), a.state());
     }
 
-    // Defect: the steady-state rebind stream rewriting the file every refresh.
     #[test]
     fn a_no_op_commit_does_not_touch_the_file() {
         let dir = Scratch::new("noop");
@@ -547,7 +470,6 @@ mod tests {
         assert!(!s.reload_if_changed().unwrap());
     }
 
-    // Defect: a corrupt file blocking startup, or being silently overwritten (lost forever).
     #[test]
     fn a_corrupt_file_is_moved_aside_and_the_store_starts_empty() {
         let dir = Scratch::new("corrupt");
@@ -566,7 +488,6 @@ mod tests {
         assert_eq!(fs::read_to_string(cfg.join(&aside[0])).unwrap(), "this is = = not toml");
     }
 
-    // Defect: an old binary loading a newer file and overwriting it on the next commit.
     #[test]
     fn a_newer_file_refuses_to_load_and_is_left_in_place() {
         let dir = Scratch::new("newer");

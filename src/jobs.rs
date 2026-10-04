@@ -1,17 +1,9 @@
-//! Boundary for `<dir>/jobs/<jobId>/state.json` (bg sessions).
-//!
-//! SECURITY: the file holds `providerEnv` (live credentials). `WireJob` has no such field, so
-//! serde skips it as an ignored value and it is never materialised. Parse errors are reported as
-//! a `Problem` category only, never via `serde_json::Error`'s Display, which can quote values.
-
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
 use crate::model::{At, ConfigDir, JobId, Problem, SafeText, SessionId};
 
-/// A bg job, parsed. Classifier fields (`state`, `tempo`, `detail`, `needs`) are LLM verdicts that
-/// go stale (gotcha 4); derive consults them only where the registry is silent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Job {
     pub id: JobId,
@@ -21,16 +13,13 @@ pub struct Job {
     pub detail: Option<SafeText>,
     pub needs: Option<SafeText>,
     pub fan: Vec<FanItem>,
-    /// `linkScanPath`: the exact transcript path. None before the first prompt.
     pub transcript: Option<PathBuf>,
     pub worktree_path: Option<PathBuf>,
     pub worktree_branch: Option<String>,
     pub name: Option<String>,
     pub remote_control: bool,
-    /// `children[kind==pr]` numbers. Other children (frames) are dropped.
     pub prs: Vec<u32>,
     pub updated_at: Option<At>,
-    /// `lastTerminalAt`, else `updatedAt`. Drives the 24h Exited window.
     pub ended_at: Option<At>,
 }
 
@@ -54,16 +43,12 @@ pub enum Tempo {
     Other(String),
 }
 
-/// A `fan[]` entry. For bg rows this is the authoritative live roster of background work.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FanItem {
     pub id: String,
     pub kind: FanKind,
-    /// Already redacted. For `Shell` the raw label is the command line (may hold secrets), so the
-    /// parser keeps only the first word after stripping env assignments, then redacts.
     pub label: SafeText,
     pub started_at: Option<At>,
-    /// None means open.
     pub done_at: Option<At>,
     pub failed: bool,
 }
@@ -96,7 +81,6 @@ struct WireJob {
     children: Option<Vec<WireChild>>,
     updated_at: Option<String>,
     last_terminal_at: Option<String>,
-    // providerEnv: deliberately absent. Do not add it.
 }
 
 #[derive(Deserialize)]
@@ -117,7 +101,6 @@ struct WireChild {
     href: Option<String>,
 }
 
-/// Pure parse of one state.json. The JobId comes from the dir name, not the file.
 pub fn parse(id: JobId, bytes: &[u8]) -> Result<Job, Problem> {
     let w: WireJob = serde_json::from_slice(bytes).map_err(|_| Problem::Unparsable)?;
     let updated_at = w.updated_at.as_deref().and_then(At::parse_iso);
@@ -164,7 +147,6 @@ fn nonempty(s: Option<String>) -> Option<String> {
     s.filter(|s| !s.is_empty())
 }
 
-/// `needs` is a question string; tolerate an object carrying one under `question`.
 fn question(needs: &serde_json::Value) -> Option<&str> {
     let q = match needs {
         serde_json::Value::String(s) => s.as_str(),
@@ -174,7 +156,6 @@ fn question(needs: &serde_json::Value) -> Option<&str> {
     (!q.trim().is_empty()).then_some(q)
 }
 
-/// The child's `id` is the PR number; the `href` ending `/pull/<n>` is the fallback.
 fn pr_number(child: &WireChild) -> Option<u32> {
     let from_id = || match child.id.as_ref()? {
         serde_json::Value::String(s) => s.parse().ok(),
@@ -196,8 +177,6 @@ fn fan_item(w: WireFan) -> FanItem {
     };
     let raw = w.label.unwrap_or_default();
     let label = match kind {
-        // A shell label is the raw command line, which can carry inline secrets in its
-        // arguments. Only the program name survives.
         FanKind::Shell => SafeText::redact(SafeText::redact(&raw).as_str().split(' ').next().unwrap_or("")),
         _ => SafeText::redact(&raw),
     };
@@ -211,14 +190,11 @@ fn fan_item(w: WireFan) -> FanItem {
     }
 }
 
-/// `<dir>/jobs/`; a notify watch target (recursive, so state.json rewrites ring the bell).
 pub fn jobs_dir(dir: &ConfigDir) -> PathBuf {
     dir.0.join("jobs")
 }
 
 impl Job {
-    /// Open fan items by kind, for Parked counts and tree leaves. Todos are excluded (they are
-    /// tasks, shown in the detail pane, not background work).
     pub fn open_work(&self) -> impl Iterator<Item = &FanItem> {
         self.fan.iter().filter(|f| f.done_at.is_none() && f.kind != FanKind::Todo)
     }
@@ -238,8 +214,6 @@ mod tests {
 
     #[test]
     fn secrets_in_provider_env_and_shell_labels_never_materialise() {
-        // Defects: `providerEnv` deserialized into the domain value, or a shell label (the raw
-        // command line) carrying an inline key to the screen (gotcha 35).
         let job = live();
         assert!(!format!("{job:?}").contains("SECRET_SENTINEL"), "{job:?}");
         let shell = job.fan.iter().find(|f| f.kind == FanKind::Shell).unwrap();
@@ -248,8 +222,6 @@ mod tests {
 
     #[test]
     fn live_state_maps_every_used_field() {
-        // Defects: ISO job timestamps read as epoch ms (gotcha 29), frame children counted as
-        // PRs (gotcha 28), duplicate PR links, or an empty bridge id read as Remote Control.
         let job = live();
         assert_eq!(job.id, JobId("c0ffee00".into()));
         assert_eq!(job.session_id, Some(SessionId("c0ffee00-1111-4222-8333-444444444444".into())));
@@ -266,7 +238,6 @@ mod tests {
 
     #[test]
     fn open_work_excludes_done_items_and_todos() {
-        // Defect: a finished monitor or a todo counted as background work the job waits on.
         let job = live();
         let open: Vec<_> = job.open_work().map(|f| f.id.as_str()).collect();
         assert_eq!(open, ["a1", "b1", "x1"]);
@@ -277,8 +248,6 @@ mod tests {
 
     #[test]
     fn unknown_values_and_null_collections_degrade() {
-        // Defects: a new classifier state, tempo or fan kind (or a null `fan`) failing the whole
-        // parse, so the bg row loses its job.
         let job = live();
         assert_eq!(job.fan.last().unwrap().kind, FanKind::Other("cron".into()));
         let job = parse(JobId("b10cked0".into()), &fixture("blocked_future.json")).unwrap();
@@ -292,7 +261,6 @@ mod tests {
 
     #[test]
     fn parse_failure_is_a_category_without_content() {
-        // Defect: serde's error text (which can quote file values) leaking into a diagnostic.
         let torn = br#"{"state":"working","providerEnv":{"K":"SECRET_SENTINEL_x9""#;
         assert_eq!(parse(JobId("x".into()), torn), Err(Problem::Unparsable));
     }

@@ -1,10 +1,3 @@
-//! View state, the pure layout, the pure key reducer, and the renderer.
-//!
-//! `layout` turns (snapshot, user state, app) into plain `Line` data: grouping, sorting,
-//! filtering, tree flattening and cursor placement are all decided here, with no ratatui types,
-//! so they are tested by comparing values. `update` never does IO: it returns `Effect`s.
-//! `render` never decides anything: it maps `Line`s to widgets.
-
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
@@ -25,28 +18,20 @@ use crate::model::{
 use crate::user_state::UserState;
 
 const FLASH_MS: i64 = 4000;
-/// Columns before a row's second line and before tree prefixes, so both sit under the title.
 const INDENT: &str = "     ";
 
-/// Everything the UI remembers between frames. The cursor and expansion are keyed by `RowKey`,
-/// not by index, so a re-sort (rows move when their status changes) never moves the cursor to a
-/// different session.
 #[derive(Debug)]
 pub struct App {
     pub popup: bool,
     cursor: Option<Target>,
-    /// Layout index of the cursor when it was last placed. Only consulted when the cursor's
-    /// target has vanished, so the neighbour that slid into its place takes over.
     last_index: usize,
     expanded: HashSet<RowKey>,
     detail: bool,
-    /// The committed filter (`/` then Enter). Empty means none.
     filter: String,
     mode: Mode,
     flash: Option<Flash>,
 }
 
-/// Something the cursor can rest on. Headers and finished-counts are not selectable.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
     Row(RowKey),
@@ -64,18 +49,10 @@ impl Target {
 #[derive(Debug, PartialEq)]
 pub enum Mode {
     Normal,
-    /// `/`: typing narrows rows live (title, label, branch, cwd, group); Enter keeps it, Esc
-    /// clears it.
     Filter { input: String },
-    /// `r`: edit the label; empty input clears it.
     Label { key: UserKey, input: String },
-    /// `m`: type to narrow the existing groups or name a new one; ↑/↓/tab choose, Enter moves,
-    /// `-` on empty input returns to the automatic group. Letters always type, so a group name
-    /// may start with j or k.
     Move { key: UserKey, input: String, choice: usize, options: Vec<GroupName> },
-    /// `n`: optional name for the new session; Enter with empty input launches without `--name`.
     NewSession { dir: ConfigDir, cwd: PathBuf, group: Option<GroupName>, input: String },
-    /// `?`: key map and diagnostics.
     Help,
 }
 
@@ -85,7 +62,6 @@ struct Flash {
     until: At,
 }
 
-/// Abstract key, so the reducer and its tests do not depend on crossterm's event type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
     Char(char),
@@ -100,7 +76,6 @@ pub enum Key {
     Space,
 }
 
-/// crossterm -> `Key`. `None` for keys the UI ignores (releases, chords, function keys).
 pub fn key_of(ev: &KeyEvent) -> Option<Key> {
     if ev.kind != KeyEventKind::Press
         || ev.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -122,7 +97,6 @@ pub fn key_of(ev: &KeyEvent) -> Option<Key> {
     })
 }
 
-/// Input to the reducer: a key, or the result of an effect the shell ran.
 #[derive(Debug)]
 pub enum Input {
     Key(Key),
@@ -160,21 +134,6 @@ impl App {
     }
 }
 
-/// The key handler. Pure: (app, snapshot, user state, input) -> mutated app + effects. It calls
-/// `layout` to know what is under the cursor.
-///
-/// Normal mode:
-/// - j/k/↓/↑ move over selectable lines (rows and expanded tree nodes; a node is selectable
-///   only for reading, Enter on one opens its row); g/G top/bottom.
-/// - l/→/space expand; h/← collapse (or jump to the parent row from a tree node).
-/// - Enter: `row.open` -> Jump / Attach, or a flash for Unreachable.
-/// - tab/p detail pane; r label; m move; n new session (row's dir, cwd, group; prompts for an
-///   optional name); / filter; ? help; q/Esc quit (Esc first clears an active filter).
-///
-/// Outcomes: Jumped/Attached/Spawned in popup mode -> [.., Quit]; Spawned{session, group: Some}
-/// -> [Commit(SetGroup{key: Session(session)})]; Failed(msg) -> flash, never Quit.
-/// Cursor stability: if the cursor's target vanished from `layout`, the nearest selectable
-/// line takes its position.
 pub fn update(
     app: &mut App,
     snap: &Snapshot,
@@ -386,8 +345,6 @@ fn step(app: &mut App, lines: &[Line], forward: bool) {
     }
 }
 
-/// The line the cursor is on: its target if still laid out, else the selectable line nearest
-/// to where it was.
 fn selected(lines: &[Line], app: &App) -> Option<usize> {
     if let Some(t) = &app.cursor
         && let Some(i) = lines.iter().position(|l| l.target().as_ref() == Some(t))
@@ -415,8 +372,6 @@ fn non_empty(input: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.to_owned())
 }
 
-/// The picker list for `m`: what was typed (as a new group) unless it names an existing one,
-/// then the existing groups that contain it. Literal first, so Enter does what was typed.
 fn candidates(input: &str, options: &[GroupName]) -> Vec<GroupName> {
     let typed = input.trim();
     let needle = typed.to_lowercase();
@@ -438,15 +393,12 @@ fn user_group<'a>(user: &'a UserState, row: &Row) -> Option<&'a GroupName> {
     user.entry(&row.user_key).and_then(|e| e.group.as_ref())
 }
 
-/// One visible line, as plain data. Elapsed times are left as `since` so the renderer formats
-/// them against its own clock and the layout stays clock-free.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Line {
     Header { group: GroupId, title: String, count: usize, needs_you: usize },
     Row {
         key: RowKey,
         status: Status,
-        /// User label from state.toml; rendered before the title when set.
         label: Option<String>,
         title: SafeText,
         meta: Meta,
@@ -462,7 +414,6 @@ pub enum Line {
         label: SafeText,
         now: Option<SafeText>,
         since: At,
-        /// Tree-drawing prefix (`├─`, `│  └─`).
         prefix: String,
     },
     Finished { row: RowKey, count: u16, prefix: String },
@@ -477,7 +428,6 @@ impl Line {
         }
     }
 
-    /// Terminal lines this takes: a row is two (title line + now-line).
     fn height(&self) -> usize {
         match self {
             Line::Row { .. } => 2,
@@ -486,16 +436,6 @@ impl Line {
     }
 }
 
-/// The one layout function. Pure.
-/// - group each row: `user.entry(row.user_key).group` as `GroupId::User { order }`, else
-///   `GroupId::Auto(row.auto_group)`; exited rows always stay in `AutoGroup::Finished` (SPEC 7:
-///   at the bottom); groups sort by `GroupId`'s derived `Ord`;
-/// - within a group sort by `model::row_order`, then `RowKey` so ties never shuffle;
-/// - filter (committed `app.filter`, or the live `Mode::Filter` input) matches title, label,
-///   now-line, branch, cwd and group name, case-insensitively;
-/// - expanded rows get `Node` lines depth-first with tree prefixes, and one `Finished` line per
-///   level with a non-zero count;
-/// - empty groups are omitted; `AutoGroup::Finished` is last by construction.
 pub fn layout(snap: &Snapshot, user: &UserState, app: &App) -> Vec<Line> {
     let needle = app.filter_text().to_lowercase();
     let mut groups: BTreeMap<GroupId, Vec<&Row>> = BTreeMap::new();
@@ -585,11 +525,6 @@ fn flatten(out: &mut Vec<Line>, row: &RowKey, tree: &Tree, indent: &str) {
     }
 }
 
-/// Draw the frame: header (counts, `⚠ n` when diagnostics exist), the `layout` lines (two
-/// terminal lines per `Line::Row`), optional detail pane on the right (or below when narrower
-/// than 120 cols), footer with the mode's prompt or the flash. Colours: `Color::Reset` fg/bg;
-/// accents red (NeedsYou), green (Working), yellow (Parked), default (Idle, `?` glyph for
-/// asked_question), dim (Exited, line 2, finished counts).
 pub fn render(frame: &mut Frame, app: &App, snap: &Snapshot, user: &UserState, now: At) {
     let lines = layout(snap, user, app);
     let sel = selected(&lines, app);
@@ -626,8 +561,6 @@ pub fn render(frame: &mut Frame, app: &App, snap: &Snapshot, user: &UserState, n
     }
 }
 
-/// The frame as plain text, at `width` columns and tall enough that nothing scrolls. For
-/// `--dump`: e2e checks read exactly what the TUI would draw, without a TTY.
 pub fn dump(app: &App, snap: &Snapshot, user: &UserState, now: At, width: u16) -> String {
     let body: usize = layout(snap, user, app).iter().map(Line::height).sum();
     let height = u16::try_from(body + 2).unwrap_or(u16::MAX);
@@ -841,7 +774,6 @@ fn kind_name(kind: &NodeKind) -> &str {
     }
 }
 
-/// `⇄  personal · bg · main #4812  412k  $3.41`: only the parts that are known.
 fn meta_text(meta: &Meta) -> String {
     let mut parts = Vec::new();
     if meta.remote_control {
@@ -987,7 +919,6 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
 }
 
-/// `left`, padding, then `right` flush with the right edge.
 fn spread(mut left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: u16) -> TLine<'static> {
     let pad = usize::from(width).saturating_sub(spans_width(&left) + spans_width(&right));
     left.push(Span::raw(" ".repeat(pad)));
@@ -1019,8 +950,6 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-/// Status glyph for line 1: `▲` NeedsYou, `●` Working, `◐` Parked, `?` Idle asked_question,
-/// `○` Idle, `·` Exited.
 pub fn glyph(status: &Status) -> &'static str {
     match status {
         Status::NeedsYou(_) => "▲",
@@ -1032,7 +961,6 @@ pub fn glyph(status: &Status) -> &'static str {
     }
 }
 
-/// "42s", "3m", "1h", "2d". Pure; used for time-in-status and tree ages.
 pub fn elapsed(since: At, now: At) -> String {
     let s = now.millis_since(since).max(0) / 1000;
     match s {
@@ -1131,8 +1059,6 @@ mod tests {
         }
     }
 
-    // Defect: user groups after auto groups, persisted order ignored, finished not last, or a
-    // user group shown while empty.
     #[test]
     fn layout_orders_user_groups_by_persisted_order_then_auto_groups_then_finished() {
         let a = row("a", 1, Status::Working, 0, repo("beta"));
@@ -1150,7 +1076,6 @@ mod tests {
         assert_eq!(headers(&lines), ["zeta:1", "omega:1", "alpha:1", "beta:1", "finished · 24h:1"]);
     }
 
-    // Defect: a user group not overriding the auto group (row shown twice or in its repo).
     #[test]
     fn a_user_group_takes_the_row_out_of_its_repo_group() {
         let a = row("a", 1, Status::Working, 0, repo("alpha"));
@@ -1162,8 +1087,6 @@ mod tests {
         assert_eq!(titles(&lines), ["a", "b"]);
     }
 
-    // Defect: rows sorted by recency instead of status precedence; the asked-question Idle row
-    // not first within Idle; rank ties not oldest first.
     #[test]
     fn layout_sorts_by_status_precedence_then_oldest_first() {
         let g = repo("r");
@@ -1180,8 +1103,6 @@ mod tests {
         assert!(matches!(lines[0], Line::Header { needs_you: 1, count: 6, .. }));
     }
 
-    // Defect: the filter ignoring labels, branches, cwd or group names; matching case-sensitively;
-    // empty groups left behind; header counts not reflecting the filter.
     #[test]
     fn filter_matches_label_branch_cwd_and_group_case_insensitively() {
         let mut a = row("alpha task", 1, Status::Working, 0, repo("one"));
@@ -1229,8 +1150,6 @@ mod tests {
         r
     }
 
-    // Defect: wrong tree prefixes (a depth-2 child not nested under its parent's rail),
-    // finished counts dropped, or a collapsed row showing children.
     #[test]
     fn expanded_rows_flatten_depth_first_with_rails_and_finished_counts() {
         let s = snap(vec![tree_row(), row("plain", 2, Status::Working, 0, repo("r"))]);
@@ -1264,7 +1183,6 @@ mod tests {
         );
     }
 
-    // Defect: the cursor tracking an index, so a re-sort silently moves it to another session.
     #[test]
     fn cursor_follows_its_row_across_a_re_sort_and_navigates_in_the_new_order() {
         let g = repo("r");
@@ -1288,7 +1206,6 @@ mod tests {
         assert_eq!(cursor_title(&app, &layout(&after, &user, &app)), Some("a"));
     }
 
-    // Defect: the cursor vanishing (or jumping to the top) when its session disappears.
     #[test]
     fn a_vanished_cursor_row_hands_the_cursor_to_the_row_that_took_its_place() {
         let g = repo("r");
@@ -1310,7 +1227,6 @@ mod tests {
         r
     }
 
-    // Defect: the popup not closing after a successful jump.
     #[test]
     fn popup_enter_jumps_then_quits_only_after_jumped() {
         let s = snap(vec![pane_row()]);
@@ -1321,8 +1237,6 @@ mod tests {
         assert_eq!(update(&mut app, &s, &user, Input::Done(Outcome::Jumped), NOW), [Effect::Quit]);
     }
 
-    // Defect: a failed jump closing the popup (the user loses the dashboard and lands nowhere),
-    // or the failure being silent.
     #[test]
     fn a_failed_jump_flashes_and_keeps_the_popup_open() {
         let s = snap(vec![pane_row()]);
@@ -1333,7 +1247,6 @@ mod tests {
         assert!(dump(&app, &s, &user, NOW, 100).contains("pane gone"));
     }
 
-    // Defect: the persistent window quitting after a jump.
     #[test]
     fn the_persistent_window_stays_open_after_a_jump() {
         let s = snap(vec![pane_row()]);
@@ -1341,7 +1254,6 @@ mod tests {
         assert_eq!(update(&mut app, &s, &UserState::default(), Input::Done(Outcome::Jumped), NOW), []);
     }
 
-    // Defect: Enter on an unreachable row emitting a jump/attach instead of explaining itself.
     #[test]
     fn enter_on_an_unreachable_row_only_flashes() {
         let s = snap(vec![row("vscode", 1, Status::Working, 0, repo("r"))]);
@@ -1351,7 +1263,6 @@ mod tests {
         assert!(dump(&app, &s, &user, NOW, 100).contains("not in tmux"));
     }
 
-    // Defect: attach losing the config dir or job id between row and effect.
     #[test]
     fn enter_on_a_bg_row_attaches() {
         let mut r = row("bg", 1, Status::Working, 0, repo("r"));
@@ -1362,8 +1273,6 @@ mod tests {
         assert_eq!(fx, [Effect::Attach { dir, job: JobId("9b3323e1".into()), title: "fees".into() }]);
     }
 
-    // Defect: `n` ignoring the row's dir/cwd/group, sending `--name ""`, splitting a typed name,
-    // or the spawned session not being filed into the group.
     #[test]
     fn new_session_prompts_for_an_optional_name_and_files_the_spawn_into_the_group() {
         let r = row("src", 1, Status::Working, 0, repo("r"));
@@ -1399,8 +1308,6 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
     }
 
-    // Defect: label edits committing on Esc, an empty label stored as "", or the prompt not
-    // starting from the current label.
     #[test]
     fn label_mode_edits_the_current_label_and_empty_clears_it() {
         let r = row("t", 1, Status::Working, 0, repo("r"));
@@ -1417,8 +1324,6 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
     }
 
-    // Defect: `m` unable to create a group starting with j/k, duplicating an existing group on
-    // an exact name, or `-` not returning the row to its automatic group.
     #[test]
     fn move_mode_picks_creates_and_returns_to_automatic() {
         let r = row("t", 1, Status::Working, 0, repo("r"));
@@ -1450,8 +1355,6 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
     }
 
-    // Defect: the filter not narrowing live, Enter dropping it, or Esc quitting while a filter
-    // is active.
     #[test]
     fn filter_narrows_live_enter_keeps_and_esc_clears_before_quitting() {
         let s = snap(vec![
@@ -1475,7 +1378,6 @@ mod tests {
         assert_eq!(titles(&layout(&s, &user, &app)), ["fees", "docs"]);
     }
 
-    // Defect: `q` inside help quitting the app instead of closing help.
     #[test]
     fn help_closes_on_any_key_without_quitting() {
         let s = snap(vec![row("a", 1, Status::Working, 0, repo("r"))]);
@@ -1488,8 +1390,6 @@ mod tests {
         assert_eq!(press(&mut app, &s, &user, &[Key::Char('q')]), [Effect::Quit]);
     }
 
-    // Defect: expand/collapse keys not wired, `h` on a node not returning to its row, or the
-    // detail pane not toggling with both tab and p.
     #[test]
     fn expand_collapse_and_detail_toggles() {
         let s = snap(vec![tree_row()]);
@@ -1507,16 +1407,12 @@ mod tests {
         assert!(!app.detail);
     }
 
-    // Defect: an off-by-one at a unit boundary ("60s", "60m") or a negative age when the
-    // clock is behind a file timestamp.
     #[test]
     fn elapsed_formats_each_unit_boundary() {
         let at = |s: i64| elapsed(At(NOW.0 - s * 1000), NOW);
         assert_eq!([at(42), at(60), at(3599), at(3600), at(86_400), at(-5)], ["42s", "1m", "59m", "1h", "1d", "0s"]);
     }
 
-    // Defect: glyphs, header counts, diagnostics marker, tree rails or the second line missing
-    // from the real frame.
     #[test]
     fn test_backend_render_smoke() {
         let mut needs = row("Fix token refresh race", 1, Status::NeedsYou(Need::Permission { tool: Some("Bash".into()) }), NOW.0 - 180_000, repo("jnj-web"));

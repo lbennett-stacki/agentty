@@ -1,16 +1,3 @@
-//! Boundary and incremental fold for transcript JSONL files: the main
-//! `projects/<slug>/<sid>.jsonl` and every `subagents/agent-<id>.jsonl` (same reducer; subagent
-//! files simply never produce metadata or turn records).
-//!
-//! Shape: `Transcript` owns a byte cursor and a `Facts` value. `pump()` reads only appended
-//! complete lines and folds each into `Facts` via `Facts::apply_line`, a pure reducer. Wire
-//! structs and the intermediate `Event` enum are private to this file; callers only see `Facts`.
-//!
-//! Window policy (SPEC: tail-read, never full scans): on first open, fold the smallest bounded
-//! tail that holds a metadata block (`last-prompt` record), so every "latest wins" metadata
-//! field and the recent conversation are present from the first frame. Anything older than the
-//! window start is outside the `Horizon`, and `Facts` says so instead of guessing.
-
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -23,12 +10,6 @@ use serde::de::IgnoredAny;
 
 use crate::model::{At, SafeText, TaskId, TaskOutcome, ToolUseId};
 
-// ---------------------------------------------------------------------------------------------
-// Public: the cursor
-// ---------------------------------------------------------------------------------------------
-
-/// Identity + size of a file at last read. A changed inode or a shrunk length means the file was
-/// replaced, not appended, and the fold restarts from a fresh window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileStamp {
     pub ino: u64,
@@ -48,21 +29,13 @@ impl FileStamp {
     }
 }
 
-/// How much history to take on first open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Window {
-    /// Main transcript: tail 256 KB; if it holds no `"type":"last-prompt"` line, retry at 1 MB
-    /// then 4 MB (a substring scan, no parse). The fold starts at the first complete line of
-    /// the tail that holds one, so the latest metadata block and the recent conversation are
-    /// both inside. Max observed metadata distance from EOF is 310 KB.
     Main,
-    /// Subagent jsonl: tail 64 KB. Enough for its last tool_use and any depth-2 notifications.
     Sidecar,
 }
 
 impl Window {
-    /// Upper bound of bytes `open` may read for this window, so `World` can charge it against
-    /// the per-refresh read budget before opening.
     pub fn max_bytes(self) -> u64 {
         match self {
             Window::Main => 4 << 20,
@@ -78,22 +51,16 @@ impl Window {
     }
 }
 
-/// An open transcript: cursor + folded facts. One per file path, shared by every row whose
-/// session resolves to that file (two live holders of one sessionId share one fold).
 pub struct Transcript {
     path: PathBuf,
     stamp: FileStamp,
-    /// Byte offset of the first unread byte.
     offset: u64,
-    /// Trailing bytes after the last `\n`, held back until the line completes.
     partial: Vec<u8>,
     window: Window,
     facts: Facts,
 }
 
 impl Transcript {
-    /// Open and fold the initial window. Fails only on IO; malformed lines are counted in
-    /// `Facts::skipped`, never fatal.
     pub fn open(path: PathBuf, window: Window) -> std::io::Result<Transcript> {
         let stamp = FileStamp::of(&path)?;
         let mut file = File::open(&path)?;
@@ -105,16 +72,10 @@ impl Transcript {
         Ok(t)
     }
 
-    /// Bytes the first-sight window folded: what `World` charges against its read budget.
     pub fn window_bytes(&self) -> u64 {
         self.stamp.len.min(self.window.max_bytes())
     }
 
-    /// Fold newly appended complete lines. Returns whether `facts` changed. Cheap when nothing
-    /// changed: one `stat`, compared to `stamp`. If the stamp shows replacement (inode change or
-    /// `len < offset`), re-open from a fresh window. An in-place rewrite to the same or a
-    /// larger length is indistinguishable from an append by `stat`; transcripts are
-    /// append-only (GROUNDING 2.3), so none occurs.
     pub fn pump(&mut self) -> std::io::Result<bool> {
         let stamp = FileStamp::of(&self.path)?;
         if stamp.ino != self.stamp.ino || stamp.len < self.offset {
@@ -133,8 +94,6 @@ impl Transcript {
         Ok(changed)
     }
 
-    /// Split `bytes` (prefixed by the held-back partial line) into complete lines and fold
-    /// each; keep the trailing remainder. Returns whether any line was folded.
     fn fold(&mut self, bytes: &[u8]) -> bool {
         let mut data = std::mem::take(&mut self.partial);
         data.extend_from_slice(bytes);
@@ -170,14 +129,6 @@ fn read_range(file: &mut File, start: u64, end: u64) -> std::io::Result<Vec<u8>>
 
 const LAST_PROMPT_MARK: &[u8] = b"\"type\":\"last-prompt\"";
 
-/// Choose the window start for `file` of length `len` and return it with the bytes from there
-/// to `len`, so the caller folds what was already read. Pure over the bytes it reads; split out
-/// because it is the one place the 256 KB / metadata-block policy lives.
-///
-/// The fold starts at the first complete line of the smallest tail that holds a `last-prompt`
-/// record, not at that record: the metadata block is re-appended between turns too, so on 5 of
-/// 9 live transcripts probed it was the last thing in the file and a fold from there saw no
-/// conversational record at all (no turn, no launches).
 fn window_start(file: &mut File, len: u64, window: Window) -> std::io::Result<(u64, Vec<u8>)> {
     let sizes = window.tail_sizes();
     for (i, &size) in sizes.iter().enumerate() {
@@ -206,87 +157,50 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
-// ---------------------------------------------------------------------------------------------
-// Public: the folded facts
-// ---------------------------------------------------------------------------------------------
-
-/// Everything derive needs from one transcript, kept current by `apply_line`. All "latest
-/// wins" fields hold the latest value seen; all collections are bounded by the number of
-/// background tasks or PRs, never by file size.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Facts {
     pub horizon: Horizon,
     pub turn: Turn,
-    /// Background work launched within the horizon and not yet terminal. Keyed by task id.
     pub open_bg: BTreeMap<TaskId, BgItem>,
-    /// Latest notice per task id (agents can re-notify and be re-opened, gotcha 22).
-    /// For a subagent file this holds its depth-2 children's completions.
     pub notices: HashMap<TaskId, Notice>,
     pub last_tool: Option<ToolCall>,
     pub last_text: Option<TextBlock>,
-    /// The last record is end-of-turn assistant text or a handback tool_result, with no later
-    /// tool_use or tool_result. Only meaningful for sidecar files (no `turn_duration` there,
-    /// and `stop_reason` is unreliable, gotcha 26): it is `NodeState` rule 4's input.
     pub tail_looks_finished: bool,
     pub titles: Titles,
     pub last_prompt: Option<SafeText>,
     pub away_summary: Option<SafeText>,
     pub worktree: Option<Worktree>,
-    /// `gitBranch` of the latest conversational record.
     pub branch: Option<String>,
-    /// All PRs ever linked within the horizon, deduped by number, in first-seen order.
     pub prs: Vec<u32>,
     pub usage: Option<Usage>,
-    /// Pending ScheduleWakeup time; replaced by newer calls, cleared by `{stop:true}`.
     pub wakeup: Option<At>,
-    /// A `cost-state` with no later conversational record: the process exited cleanly. Cleared
-    /// by any later conversational record (resume).
     pub exit: Option<ExitTotals>,
-    /// Latest `bridge-session` says a Remote Control bridge is attached.
     pub bridge_active: bool,
-    /// Timestamp of the latest record of any kind; used for subagent liveness.
     pub last_activity: Option<At>,
-    /// Non-empty lines fed to the reducer.
     pub lines: u64,
-    /// Lines that were not JSON, or conversational records without a usable timestamp.
     pub skipped: u64,
-    /// Well-formed records whose `type` this build does not know. A diagnostic, never fatal.
     pub unknown: u64,
-    /// Tool uses awaiting their tool_result, so a background launch can be labelled with the
-    /// tool_use's description. Pruned when the result arrives; bounded by in-flight tools.
     pending_tools: HashMap<ToolUseId, PendingTool>,
 }
 
-/// Where our knowledge starts. Launches before the window start are invisible, so counts
-/// derived from `open_bg` are lower bounds unless `from_start`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Horizon {
     pub from_start: bool,
-    /// Timestamp of the first record inside the window. A subagent whose jsonl went quiet before
-    /// this, with no notice seen, finished before our window (see `subagents::agent_state`).
     pub first_at: Option<At>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Turn {
-    /// No turn boundary seen in the window yet.
     #[default]
     Unknown,
-    /// Opened by a `user` record (human, task-notification, peer, scheduled), or inferred from
-    /// assistant activity when the window started mid-turn.
     Open { since: At },
-    /// Closed by `system/turn_duration`. `pending_agents` is `pendingBackgroundAgentCount`
-    /// (absent means 0); it counts depth-2 agents, which the fold may not see.
     Closed { at: At, pending_agents: u16 },
-    /// `[Request interrupted by user…]`; these rarely get a turn_duration.
     Interrupted { at: At },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BgItem {
     pub kind: BgKind,
-    /// The launching tool_use's `description` (Agent/Monitor/Bash), redacted. Never the Bash
-    /// command: the wire struct for Bash input does not deserialize `command`.
     pub label: SafeText,
     pub started: At,
     pub tool_use: Option<ToolUseId>,
@@ -299,10 +213,6 @@ pub enum BgKind {
     Monitor,
 }
 
-/// A `<task-notification>` seen for a task id. `outcome: None` is a monitor event (monitor
-/// events carry no `<status>`, gotcha 21): the monitor fired and is still running, so the item
-/// stays in `open_bg`. `Some` is terminal and removes it. Monitor expiry and `stream ended` map
-/// to `Some(Completed)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Notice {
     pub at: At,
@@ -313,7 +223,6 @@ pub struct Notice {
 pub struct ToolCall {
     pub id: ToolUseId,
     pub name: String,
-    /// `tool_summary`: description ?? basename(file_path) ?? pattern ?? "".
     pub summary: SafeText,
     pub at: At,
     pub answered: bool,
@@ -323,7 +232,6 @@ pub struct ToolCall {
 pub struct TextBlock {
     pub first_line: SafeText,
     pub at: At,
-    /// The text ends with `?` (after trimming whitespace and closing quotes/markdown).
     pub is_question: bool,
 }
 
@@ -343,7 +251,6 @@ pub struct Worktree {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Usage {
-    /// input + cache_read + cache_creation of the latest non-synthetic assistant message.
     pub ctx_tokens: u64,
     pub model: String,
     pub at: At,
@@ -364,36 +271,10 @@ struct PendingTool {
 const FILE_HISTORY_PREFIX: &[u8] = b"{\"type\":\"file-history-";
 
 impl Facts {
-    /// Empty facts whose horizon covers the whole file. `Transcript::open` uses this when the
-    /// window starts at byte 0; tests use it to fold a complete fixture.
     pub fn from_start() -> Facts {
         Facts { horizon: Horizon { from_start: true, first_at: None }, ..Facts::default() }
     }
 
-    /// The reducer. Parses one complete JSONL line and folds it in. Unknown record types are
-    /// counted in `unknown`, unparseable lines in `skipped`, and both are otherwise ignored.
-    /// `file-history-*` lines are rejected by a prefix check before any JSON parse.
-    ///
-    /// Folding rules (GROUNDING 2.3-2.4, 3.3):
-    /// - user carrying `origin.kind` or `turnOrigin` and no tool_result -> Turn::Open;
-    ///   interrupt text -> Turn::Interrupted. Local-command echoes carry neither and open nothing.
-    /// - system/turn_duration -> Turn::Closed{pending_agents}.
-    /// - assistant tool_use -> last_tool + pending_tools, tail_looks_finished = false; text ->
-    ///   last_text, tail_looks_finished = true; usage -> usage (skip model `<synthetic>`).
-    ///   `thinking` ignored (gotcha 37). Any of these while Turn::Unknown infers Turn::Open.
-    /// - user tool_result: answer last_tool; tail_looks_finished = the tool was
-    ///   SubagentHandback; if `toolUseResult` shows a launch (Agent `status:"async_launched"`,
-    ///   Bash `backgroundTaskId`, Monitor `taskId`) insert open_bg; `resumedAgentId` re-opens
-    ///   an agent; TaskStop closes its id; ScheduleWakeup sets or clears `wakeup`.
-    /// - task notification, counted ONLY from user `origin.kind=="task-notification"` or
-    ///   attachment `queued_command` with `commandMode=="task-notification"` (never
-    ///   `queue-operation`, gotcha 20): for each task id, record a Notice; remove from open_bg
-    ///   when the outcome is Some.
-    /// - system/agents_killed: close every open agent with Some(Killed).
-    /// - cost-state: set `exit`; close everything in open_bg (the process is gone).
-    /// - any later conversational record clears `exit`.
-    /// - metadata records: latest wins into titles / last_prompt / worktree / bridge; pr-link
-    ///   appends to prs if new.
     pub fn apply_line(&mut self, line: &[u8]) {
         let line = line.trim_ascii();
         if line.is_empty() {
@@ -492,16 +373,12 @@ impl Facts {
         }
     }
 
-    /// Assistant activity only happens inside a turn, so a window that starts mid-turn can
-    /// still report an open turn instead of `Unknown`.
     fn infer_open(&mut self, at: At) {
         if self.turn == Turn::Unknown {
             self.turn = Turn::Open { since: at };
         }
     }
 
-    /// What a tool_result's `toolUseResult` says about background work, interpreted with the
-    /// tool's name where the key alone is ambiguous (`taskId` is also on TaskUpdate results).
     fn apply_signal(&mut self, at: At, id: ToolUseId, pending: Option<PendingTool>, s: WireToolResult) {
         let name = pending.as_ref().map_or("", |p| p.name.as_str());
         let launch = if let Some(b) = s.background_task_id {
@@ -538,18 +415,11 @@ impl Facts {
         }
     }
 
-    /// Open background items by kind.
     pub fn open_count(&self, kind: BgKind) -> u16 {
         self.open_bg.values().filter(|b| b.kind == kind).count() as u16
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Private: wire structs and the event vocabulary between parse and fold
-// ---------------------------------------------------------------------------------------------
-
-/// One flat struct for every record type: all fields optional, unknown fields ignored. Cheaper
-/// and more forgiving than an internally tagged enum (no buffering, no failure on new types).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireLine {
@@ -579,7 +449,6 @@ struct WireLine {
     bridge_session_id: Option<String>,
 }
 
-/// Marks a key as present whatever its value, so `"k": null` is `Some(None)`, not `None`.
 fn present<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
     Option::<T>::deserialize(d).map(Some)
 }
@@ -591,8 +460,6 @@ struct WireMessage {
     usage: Option<WireUsage>,
 }
 
-/// `message.content` / `attachment.prompt`: a plain string or a list of blocks. The third arm
-/// keeps a line parseable when a block has a shape this build does not know.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum WireContent {
@@ -622,8 +489,6 @@ impl WireContent {
     }
 }
 
-/// One content block. `tool_result` blocks carry a `content` field that can be 40 KB; it is
-/// not declared here, so it is never materialised.
 #[derive(Deserialize)]
 struct WireBlock {
     #[serde(rename = "type")]
@@ -667,8 +532,6 @@ struct WireWorktree {
     worktree_branch: Option<String>,
 }
 
-/// Tool inputs we read. Note what is missing: Bash `command`. It is never deserialized, so it
-/// cannot be displayed or logged by accident.
 #[derive(Deserialize, Default)]
 struct WireToolInput {
     description: Option<String>,
@@ -676,8 +539,6 @@ struct WireToolInput {
     pattern: Option<String>,
 }
 
-/// `toolUseResult`: an object with the launch/stop signals we read, or anything else (error
-/// strings), which is ignored without being materialised.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum WireResult {
@@ -685,37 +546,26 @@ enum WireResult {
     Other(IgnoredAny),
 }
 
-/// The background-work signals a `toolUseResult` can carry (GROUNDING 2.4). TaskStop's result
-/// also carries the raw `command`; it is not declared here.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 struct WireToolResult {
-    /// Bash: `run_in_background`, or auto-backgrounded.
     #[serde(rename = "backgroundTaskId")]
     background_task_id: Option<String>,
-    /// Agent: `async_launched` or `completed`. The input flag does not decide (gotcha 19).
     status: Option<String>,
     #[serde(rename = "agentId")]
     agent_id: Option<String>,
-    /// Monitor. TaskUpdate results carry the same key, so the tool name decides.
     #[serde(rename = "taskId")]
     monitor_task_id: Option<String>,
-    /// TaskStop.
     #[serde(rename = "task_id")]
     stopped_task_id: Option<String>,
-    /// SendMessage to an agent that had stopped.
     #[serde(rename = "resumedAgentId")]
     resumed_agent_id: Option<String>,
-    /// ScheduleWakeup: epoch ms; `0` with `stopped: true` on cancel.
     #[serde(rename = "scheduledFor")]
     scheduled_for: Option<f64>,
     stopped: Option<bool>,
 }
 
-/// What one line means, independent of its wire shape. One line can yield several events
-/// (an assistant block with usage and a tool_use).
 #[derive(Debug, PartialEq)]
 enum Event {
-    /// Any conversational record (user, assistant, system, attachment).
     Seen { at: At },
     TurnOpened { at: At },
     Interrupted { at: At },
@@ -745,7 +595,6 @@ enum Reject {
     Unknown,
 }
 
-/// Known metadata types that carry nothing the dashboard shows.
 const IGNORED_TYPES: &[&str] = &[
     "atis-latch",
     "mode",
@@ -758,7 +607,6 @@ const IGNORED_TYPES: &[&str] = &[
     "fork-context-ref",
 ];
 
-/// Line -> events. Pure.
 fn events(line: &[u8], out: &mut Vec<Event>) -> Result<(), Reject> {
     let w: WireLine = serde_json::from_slice(line).map_err(|_| Reject::Unparsable)?;
     let Some(ty) = w.ty.as_deref() else { return Err(Reject::Unknown) };
@@ -900,11 +748,6 @@ fn attachment_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
     }
 }
 
-/// Parse a `<task-notification>` body into (task id, outcome) pairs. One notification can list
-/// several ids (orphan sweep); the fake `__orphan_summary__:*` id is dropped. Monitor events have
-/// no `<status>`: `[Monitor expired …]` and `stream ended` yield `Some(Completed)`, any other
-/// monitor event yields `None` (the monitor is still running). An unknown `<status>` value is
-/// still terminal and maps to `Completed`.
 fn parse_task_notification(xml: &str) -> Vec<(TaskId, Option<TaskOutcome>)> {
     let mut out = Vec::new();
     for block in xml.split("<task-notification>").skip(1) {
@@ -934,7 +777,6 @@ fn parse_task_notification(xml: &str) -> Vec<(TaskId, Option<TaskOutcome>)> {
     out
 }
 
-/// First `<name>…</name>` body in `s`, and the text after its closing tag.
 fn tag_split<'a>(s: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
     let open = format!("<{name}>");
     let close = format!("</{name}>");
@@ -947,17 +789,12 @@ fn tag<'a>(s: &'a str, name: &str) -> Option<&'a str> {
     tag_split(s, name).map(|(body, _)| body)
 }
 
-/// The display summary of a tool_use: `description` ?? basename(`file_path`) ?? `pattern` ?? "".
-/// Redacted. The tool name is prepended by the renderer, not here.
 fn tool_summary(input: &WireToolInput) -> SafeText {
     let basename = input.file_path.as_deref().map(|p| p.rsplit('/').next().unwrap_or(p));
     let raw = input.description.as_deref().or(basename).or(input.pattern.as_deref()).unwrap_or("");
     SafeText::redact(raw)
 }
 
-/// Does assistant text end in a question to the user? Trims trailing whitespace, `*`, `_`,
-/// `` ` ``, quotes and `)`, then checks for `?`. Deliberately simple and documented as a
-/// heuristic (`Status::Idle { asked_question }`).
 fn is_question(text: &str) -> bool {
     text.trim_end_matches(|c: char| c.is_whitespace() || "*_`\"')".contains(c)).ends_with('?')
 }
@@ -972,7 +809,6 @@ pub(crate) mod tests {
     pub(crate) const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/");
     const SENTINEL: &str = "SECRET_SENTINEL_x9";
 
-    /// Synthetic record builders. Shapes follow the real records probed for GROUNDING 2.3-2.4.
     pub(crate) fn ts(n: u32) -> String {
         format!("2026-01-02T10:{:02}:{:02}.000Z", n / 60, n % 60)
     }
@@ -1081,8 +917,6 @@ pub(crate) mod tests {
 
     #[test]
     fn turn_opens_on_prompt_and_closes_with_pending_agent_count() {
-        // Defect: a parked session (turn ended, agents live) shown as Working, or its agent
-        // count lost because `pendingBackgroundAgentCount` was dropped.
         let mut lines = vec![human(0, "Audit it")];
         lines.extend(launch_agent(1, "t1", "a1", "Launch audit"));
         lines.push(text(3, "Launched."));
@@ -1101,7 +935,6 @@ pub(crate) mod tests {
 
     #[test]
     fn interrupt_without_turn_duration_is_not_an_open_turn() {
-        // Defect: an interrupted turn stuck Open forever (Working under a busy registry).
         let interrupt = conv(2, "user", json!({"message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}));
         let f = fold(&[human(0, "go"), tool_use(1, "t1", "Read", json!({"file_path": "/a/b.rs"})), interrupt]);
         assert_eq!(f.turn, Turn::Interrupted { at: at(2) });
@@ -1109,7 +942,6 @@ pub(crate) mod tests {
 
     #[test]
     fn tool_results_and_local_command_echoes_do_not_open_turns() {
-        // Defect: a `! cmd` echo or a stray tool_result reopening a closed turn.
         let mut f = fold(&[human(0, "go"), text(1, "done"), turn_duration(2, None)]);
         let echo = conv(3, "user", json!({"message": {"role": "user", "content": "<command-name>/effort</command-name>"}}));
         let companion = conv(4, "user", json!({"isMeta": true, "turnCompanion": true, "message": {"role": "user", "content": [{"type": "text", "text": "reminder"}]}}));
@@ -1119,8 +951,6 @@ pub(crate) mod tests {
 
     #[test]
     fn window_starting_mid_turn_infers_an_open_turn() {
-        // Defect: a cold start whose window begins mid-turn reports Turn::Unknown, which
-        // derive renders as Parked under a busy registry.
         let mut f = Facts::default();
         fold_into(&mut f, &[tool_use(1, "t1", "Read", json!({"file_path": "/a/b.rs"})), tool_result(2, "t1", json!({}))]);
         assert_eq!(f.turn, Turn::Open { since: at(1) });
@@ -1130,8 +960,6 @@ pub(crate) mod tests {
 
     #[test]
     fn completion_counts_from_delivery_records_never_from_queue_operation() {
-        // Defect (gotcha 20): the `queue-operation enqueue` copy closing a task before the
-        // delivery copy, or the three copies disagreeing.
         let mut f = fold(&launch_shell(1, "t1", "b1", "Run tests"));
         let done = notif_xml(&["b1"], Some("completed"), "");
         fold_into(&mut f, &[queue_op(3, &done)]);
@@ -1147,7 +975,6 @@ pub(crate) mod tests {
 
     #[test]
     fn orphan_sweep_closes_every_listed_id_and_drops_the_fake_one() {
-        // Defect (gotcha 23): only the first id closed; `__orphan_summary__:shell` shown as a task.
         let mut lines: Vec<Value> = launch_shell(1, "t1", "b1", "one").into();
         lines.extend(launch_shell(3, "t2", "b2", "two"));
         lines.extend(launch_agent(5, "t3", "a1", "three"));
@@ -1163,8 +990,6 @@ pub(crate) mod tests {
 
     #[test]
     fn monitor_event_without_status_keeps_it_open_until_expiry() {
-        // Defect (gotcha 21): a monitor closed by its first event; a TaskUpdate `taskId`
-        // mistaken for a monitor launch.
         let mut f = fold(&[
             tool_use(1, "t1", "Monitor", json!({"command": format!("{SENTINEL} gh run watch"), "description": "Watch CI", "timeout_ms": 1800000})),
             tool_result(2, "t1", json!({"taskId": "b9", "timeoutMs": 1800000, "persistent": false})),
@@ -1183,7 +1008,6 @@ pub(crate) mod tests {
 
     #[test]
     fn resumed_agent_reopens_after_its_notice() {
-        // Defect (gotcha 22): an agent resumed by SendMessage shown as finished.
         let mut f = fold(&launch_agent(1, "t1", "a1", "audit"));
         fold_into(&mut f, &[notification(3, &notif_xml(&["a1"], Some("completed"), ""))]);
         assert!(f.open_bg.is_empty());
@@ -1200,8 +1024,6 @@ pub(crate) mod tests {
 
     #[test]
     fn agent_async_is_decided_by_the_result_not_the_input_flag() {
-        // Defect (gotcha 19): a synchronous agent counted as open because its input said
-        // `run_in_background: "true"`, or an unflagged async launch missed.
         let f = fold(&[
             tool_use(1, "t1", "Agent", json!({"description": "sync", "prompt": "p", "run_in_background": "true"})),
             tool_result(2, "t1", json!({"status": "completed", "agentId": "a2", "content": [{"type": "text", "text": "done"}]})),
@@ -1216,7 +1038,6 @@ pub(crate) mod tests {
 
     #[test]
     fn bash_background_variants_open_shells_labelled_by_description() {
-        // Defect: an auto-backgrounded command (timeout) not counted; a raw command used as the label.
         let mut lines: Vec<Value> = launch_shell(1, "t1", "b1", "Run the suite").into();
         lines.push(tool_use(3, "t2", "Bash", json!({"command": format!("{SENTINEL} sleep 500"), "description": "Boot the dev stack"})));
         lines.push(tool_result(4, "t2", json!({"stdout": "", "stderr": "", "backgroundTaskId": "b2", "timedOutAfterMs": 120000})));
@@ -1228,7 +1049,6 @@ pub(crate) mod tests {
 
     #[test]
     fn bash_command_never_reaches_facts() {
-        // Security rule: the Bash `command` (and TaskStop's echoed `command`) can hold secrets.
         let mut lines: Vec<Value> = launch_shell(1, "t1", "b1", "Run tests").into();
         lines.push(tool_use(3, "t2", "TaskStop", json!({"task_id": "b1"})));
         lines.push(tool_result(4, "t2", json!({"message": "stopped", "task_id": "b1", "task_type": "local_bash", "command": format!("{SENTINEL} npm test")})));
@@ -1240,7 +1060,6 @@ pub(crate) mod tests {
 
     #[test]
     fn agents_killed_closes_agents_only() {
-        // Defect: `system/agents_killed` closing shells, or leaving agents open.
         let mut lines: Vec<Value> = launch_shell(1, "t1", "b1", "shell").into();
         lines.extend(launch_agent(3, "t2", "a1", "one"));
         lines.extend(launch_agent(5, "t3", "a2", "two"));
@@ -1253,7 +1072,6 @@ pub(crate) mod tests {
 
     #[test]
     fn cost_state_marks_exit_and_a_resume_clears_it() {
-        // Defect: a resumed session still shown as exited; work orphaned by exit still counted.
         let mut f = fold(&launch_agent(1, "t1", "a1", "one"));
         fold_into(&mut f, &[json!({"type": "cost-state", "sessionId": "s-1", "totalCostUSD": 1.25, "startTime": 1})]);
         assert_eq!(f.exit, Some(ExitTotals { cost_usd: 1.25 }));
@@ -1266,8 +1084,6 @@ pub(crate) mod tests {
 
     #[test]
     fn metadata_latest_wins_prs_dedupe_and_synthetic_usage_ignored() {
-        // Defects: a stale title; a left worktree still shown; duplicate PRs; context reset
-        // to 0 by a `<synthetic>` record; a cleared bridge still shown active.
         let f = fold(&[
             json!({"type": "ai-title", "aiTitle": "First"}),
             json!({"type": "ai-title", "aiTitle": "Second"}),
@@ -1295,7 +1111,6 @@ pub(crate) mod tests {
 
     #[test]
     fn sidecar_tail_tracks_finishedness() {
-        // Defect: an agent shown Running forever after its handback, or finished while a tool runs.
         let mut f = fold_file(&Path::new(FIXTURES).join("transcript/sidecar_handback.jsonl"));
         assert!(f.tail_looks_finished, "handback tool_result ends the tail");
         assert_eq!(f.last_activity, Some(At::parse_iso("2026-01-02T10:00:14.000Z").unwrap()));
@@ -1310,7 +1125,6 @@ pub(crate) mod tests {
 
     #[test]
     fn wakeup_is_replaced_cancelled_and_fired() {
-        // Defect: a stale or cancelled wakeup shown as "parked until T".
         let mut f = fold(&[
             tool_use(1, "t1", "ScheduleWakeup", json!({"delaySeconds": 60, "prompt": "check"})),
             tool_result(2, "t1", json!({"scheduledFor": 1_700_000_060_000u64, "clampedDelaySeconds": 60})),
@@ -1338,7 +1152,6 @@ pub(crate) mod tests {
 
     #[test]
     fn garbage_unknown_and_file_history_lines_are_counted_not_fatal() {
-        // Defects: a crash on a new record type; a 1.3 MB file-history line parsed.
         let mut f = Facts::from_start();
         f.apply_line(b"not json at all");
         assert_eq!((f.lines, f.skipped, f.unknown), (1, 1, 0));
@@ -1375,7 +1188,6 @@ pub(crate) mod tests {
 
     #[test]
     fn pump_is_split_invariant() {
-        // Defect: a partial line folded early, or dropped, when appends land mid-line.
         let fixture = fs::read(Path::new(FIXTURES).join("transcript/session.jsonl")).unwrap();
         let whole = fold_file(&Path::new(FIXTURES).join("transcript/session.jsonl"));
         for chunk in [1usize, 7, 4096, 39_000] {
@@ -1397,7 +1209,6 @@ pub(crate) mod tests {
 
     #[test]
     fn pump_reopens_when_the_file_is_replaced_or_truncated() {
-        // Defect: a cursor reading past EOF, or folding the new file onto the old facts.
         let dir = scratch("replace");
         let path = dir.join("s.jsonl");
         fs::copy(Path::new(FIXTURES).join("transcript/session.jsonl"), &path).unwrap();
@@ -1423,7 +1234,6 @@ pub(crate) mod tests {
         v
     }
 
-    /// `[padding_kb_before][old block][100 KB][new block, human prompt][padding_kb_after]`.
     fn metadata_layout(name: &str, padding_kb_before: usize, padding_kb_after: usize) -> PathBuf {
         let dir = scratch(name);
         let path = dir.join("big.jsonl");
@@ -1452,9 +1262,6 @@ pub(crate) mod tests {
 
     #[test]
     fn window_grows_until_it_holds_the_latest_metadata_block() {
-        // Defect: a missing title on the first frame when the last metadata block sits beyond
-        // the 256 KB tail (max observed 310 KB); or a fold anchored on the block itself, which
-        // sees no conversation when the block trails the file.
         let far = metadata_layout("window-far", 1600, 300);
         let t = Transcript::open(far, Window::Main).unwrap();
         assert_eq!(t.facts().titles.ai.as_ref().unwrap().as_str(), "New");
@@ -1475,7 +1282,6 @@ pub(crate) mod tests {
 
     #[test]
     fn window_start_survives_a_giant_single_line() {
-        // Defect: an unbounded grow loop, or a hang, on a file whose tail has no newline.
         let dir = scratch("giant");
         let path = dir.join("giant.jsonl");
         let mut v = line(&json!({"type": "file-history-snapshot", "pad": "y".repeat(5 << 20)}));
@@ -1493,9 +1299,6 @@ pub(crate) mod tests {
         assert!(!t.facts().horizon.from_start);
     }
 
-    /// Read-only probe over the real Claude Code state on this machine. Run with
-    /// `cargo test -- --ignored --nocapture probe`. Prints parse counts and, for every live
-    /// registry session, the open background work the full fold and the tail window see.
     #[test]
     #[ignore]
     fn probe_real_transcripts() {

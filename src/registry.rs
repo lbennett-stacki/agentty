@@ -1,8 +1,3 @@
-//! Boundary for `<dir>/sessions/<pid>.json`, the authoritative "who is alive" record, and for
-//! the `ps` output that proves liveness. Yields `RegEntry`; the wire struct never leaves this
-//! file. Read-only: never writes, never deletes stale files, never opens `*.key` or the
-//! heartbeat.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -10,8 +5,6 @@ use serde::Deserialize;
 
 use crate::model::{At, ConfigDir, JobId, PaneId, Pid, Problem, ProcStart, SessionId, WaitingFor};
 
-/// One registry record, parsed and normalised. Absent keys (gotcha 11) and unknown enum values
-/// map to `None` / `Other`, never to a parse failure.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegEntry {
     pub pid: Pid,
@@ -21,15 +14,11 @@ pub struct RegEntry {
     pub kind: ProcKind,
     pub entrypoint: String,
     pub status: RegStatus,
-    /// `statusUpdatedAt`: status writes are deduplicated, so this is "in this status since".
     pub status_since: At,
     pub name: Option<Name>,
-    /// `%N` from the `tmux` field; None outside tmux and on every bg session.
     pub pane: Option<PaneId>,
     pub remote_control: bool,
     pub job: Option<JobId>,
-    /// `spare: true` or `parkedJobId` set. Kept (not filtered here) so `World` can still join a
-    /// parked interactive record to its job; `derive` never renders a hidden entry.
     pub hidden: bool,
 }
 
@@ -40,10 +29,6 @@ pub enum ProcKind {
     Other(String),
 }
 
-/// The four registry states. Precedence inside Claude is waiting > busy > shell > idle; this
-/// enum just carries the value. `waitingFor` is folded into `Waiting`, so waiting-without-reason
-/// (`Unspecified`) and reason-without-waiting are unrepresentable. `Other` (a future state) is
-/// treated as Idle by derive and reported as a `Diagnostic`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegStatus {
     Busy,
@@ -59,8 +44,6 @@ pub struct Name {
     pub source: NameSource,
 }
 
-/// `nameSource`. Only `User` and `Auto` outrank ai-title in the title precedence; `Derived`
-/// (`<cwd-basename>-<hash>`) is a last resort.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NameSource {
     User,
@@ -92,8 +75,6 @@ struct WireReg {
     parked_job_id: Option<String>,
 }
 
-/// Pure parse. `Err(MissingField)` when an identity field (pid, procStart, sessionId) is absent:
-/// without them a row cannot be keyed, so it is dropped and reported.
 pub fn parse(bytes: &[u8]) -> Result<RegEntry, Problem> {
     let w: WireReg = serde_json::from_slice(bytes).map_err(|_| Problem::Unparsable)?;
     let pid = w.pid.ok_or(Problem::MissingField("pid"))?;
@@ -131,8 +112,6 @@ pub fn parse(bytes: &[u8]) -> Result<RegEntry, Problem> {
         pane: w.tmux.as_deref().and_then(PaneId::parse),
         remote_control: nonempty(w.bridge_session_id).is_some(),
         hidden: w.spare == Some(true) || parked_job.is_some(),
-        // A parked interactive record points at the job that now represents it, so `World` can
-        // tell that the job is still alive.
         job: nonempty(w.job_id).or(parked_job).map(JobId),
     })
 }
@@ -154,9 +133,6 @@ fn nonempty(s: Option<String>) -> Option<String> {
     s.filter(|s| !s.is_empty())
 }
 
-/// Read every `^\d+\.json$` in `<dir>/sessions/` (never `*.key`, never the heartbeat). The file is
-/// rewritten without atomic rename (gotcha 8): on a parse failure, retry once after 25 ms, then
-/// skip the file for this refresh. Returns the parsed entries and one problem per skipped file.
 pub fn scan(dir: &ConfigDir) -> (Vec<RegEntry>, Vec<(PathBuf, Problem)>) {
     let mut entries = Vec::new();
     let mut problems = Vec::new();
@@ -169,7 +145,6 @@ pub fn scan(dir: &ConfigDir) -> (Vec<RegEntry>, Vec<(PathBuf, Problem)>) {
         }
         match parse_with_retry(|| std::fs::read(&path)) {
             Ok(entry) => entries.push(entry),
-            // The process exited cleanly and unlinked its record between listing and reading.
             Err(None) => {}
             Err(Some(problem)) => problems.push((path, problem)),
         }
@@ -184,7 +159,6 @@ fn is_registry_name(path: &Path) -> bool {
         .is_some_and(|stem| !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// `Err(None)`: the file is gone. `Err(Some(_))`: still unusable after the retry.
 fn parse_with_retry(
     mut read: impl FnMut() -> std::io::Result<Vec<u8>>,
 ) -> Result<RegEntry, Option<Problem>> {
@@ -202,21 +176,15 @@ fn parse_with_retry(
     }
 }
 
-/// Path of a config dir's sessions dir; also a notify watch target.
 pub fn sessions_dir(dir: &ConfigDir) -> PathBuf {
     dir.0.join("sessions")
 }
 
-/// Arguments (program name excluded, like `LIST_PANES_ARGV`) for
-/// `LC_ALL=C TZ=UTC ps -o pid=,lstart= -p a,b,c`: one call per refresh for every candidate pid.
-/// The env is set by the caller.
 pub fn ps_argv(pids: &[Pid]) -> Vec<String> {
     let list = pids.iter().map(|p| p.0.to_string()).collect::<Vec<_>>().join(",");
     vec!["-o".into(), "pid=,lstart=".into(), "-p".into(), list]
 }
 
-/// Parse `ps` output into pid -> trimmed start time (gotcha 7: trailing spaces, double-space
-/// day). A pid absent from the output is dead. Malformed lines are skipped.
 pub fn parse_ps(stdout: &str) -> HashMap<Pid, ProcStart> {
     stdout
         .lines()
@@ -228,10 +196,6 @@ pub fn parse_ps(stdout: &str) -> HashMap<Pid, ProcStart> {
         .collect()
 }
 
-/// Every config dir: `~/.claude`, each `~/.claude-*` with a `sessions/` dir, and
-/// `$CLAUDE_CONFIG_DIR` if set. Deduplicated by canonical path, keeping the first spelling seen.
-/// Re-run on every refresh (a new dir appears when the user first launches with a new
-/// CLAUDE_CONFIG_DIR).
 pub fn discover_config_dirs(home: &Path, env_override: Option<&Path>) -> Vec<ConfigDir> {
     let mut found = vec![home.join(".claude")];
     if let Ok(listing) = std::fs::read_dir(home) {
@@ -261,7 +225,6 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// A throwaway directory under the system temp dir, removed on drop.
     pub(crate) struct Scratch(PathBuf);
 
     impl Scratch {
@@ -307,8 +270,6 @@ pub(crate) mod tests {
 
     #[test]
     fn waiting_record_keeps_reason_pane_and_status_time() {
-        // Defects: waitingFor dropped (row shows "waiting" with no reason), the stale session and
-        // window part of `tmux` kept, or `updatedAt` used as "in this status since".
         let e = parse(&fixture("interactive_waiting.json")).unwrap();
         assert_eq!(e.status, RegStatus::Waiting(WaitingFor::Permission));
         assert_eq!(e.pane.as_ref().map(PaneId::as_str), Some("%251"));
@@ -321,14 +282,12 @@ pub(crate) mod tests {
 
     #[test]
     fn waiting_without_reason_is_unspecified_not_idle() {
-        // Defect: a `waiting` record with no `waitingFor` key demoted out of NeedsYou.
         let e = parse(br#"{"pid":1,"procStart":"x","sessionId":"s","status":"waiting"}"#).unwrap();
         assert_eq!(e.status, RegStatus::Waiting(WaitingFor::Unspecified));
     }
 
     #[test]
     fn spare_is_hidden_and_keeps_its_job() {
-        // Defect: a pre-warmed spare rendered as a session, or its job mistaken for exited.
         let e = parse(&fixture("bg_spare.json")).unwrap();
         assert!(e.hidden);
         assert_eq!(e.kind, ProcKind::Bg);
@@ -339,7 +298,6 @@ pub(crate) mod tests {
 
     #[test]
     fn parked_interactive_is_hidden_and_points_at_its_job() {
-        // Defect: a conversation handed to a bg job shown twice.
         let e = parse(br#"{"pid":5,"procStart":"x","sessionId":"s","kind":"interactive","status":"idle","parkedJobId":"0badf00d"}"#).unwrap();
         assert!(e.hidden);
         assert_eq!(e.job, Some(JobId("0badf00d".into())));
@@ -347,14 +305,11 @@ pub(crate) mod tests {
 
     #[test]
     fn unknown_enum_values_survive_as_other() {
-        // Defect: a new Claude release's status, kind or nameSource fails the parse and drops
-        // the row instead of degrading.
         let e = parse(&fixture("future_values.json")).unwrap();
         assert_eq!(e.status, RegStatus::Other("napping".into()));
         assert_eq!(e.kind, ProcKind::Other("daemon-worker".into()));
         assert_eq!(e.name.unwrap().source, NameSource::Other);
         assert!(e.remote_control);
-        // No statusUpdatedAt: fall back to updatedAt rather than the epoch.
         assert_eq!(e.status_since, At(1791150200000));
         let w = parse(br#"{"pid":1,"procStart":"x","sessionId":"s","status":"waiting","waitingFor":"oracle consult"}"#).unwrap();
         assert_eq!(w.status, RegStatus::Waiting(WaitingFor::Other("oracle consult".into())));
@@ -362,7 +317,6 @@ pub(crate) mod tests {
 
     #[test]
     fn identity_fields_are_required_and_named() {
-        // Defect: an unkeyable record becomes a row (or a crash) instead of a named diagnostic.
         assert_eq!(parse(br#"{"procStart":"x","sessionId":"s"}"#), Err(Problem::MissingField("pid")));
         assert_eq!(parse(br#"{"pid":1,"sessionId":"s"}"#), Err(Problem::MissingField("procStart")));
         assert_eq!(parse(br#"{"pid":1,"procStart":"x"}"#), Err(Problem::MissingField("sessionId")));
@@ -371,7 +325,6 @@ pub(crate) mod tests {
 
     #[test]
     fn torn_read_is_retried_once() {
-        // Defect (gotcha 8): a record caught mid-rewrite drops a live session for a refresh.
         let good = fixture("interactive_waiting.json");
         let mut reads = vec![Ok(good[..40].to_vec()), Ok(good.clone())].into_iter();
         let e = parse_with_retry(|| reads.next().unwrap()).unwrap();
@@ -388,7 +341,6 @@ pub(crate) mod tests {
 
     #[test]
     fn ps_output_is_trimmed_and_dead_pids_are_absent() {
-        // Defect (gotcha 7): trailing spaces or a double-space day make every session look dead.
         let out = "    1 Mon Sep 28 08:09:25 2026    \n4242 Sun Oct  4 21:17:02 2026    \ngarbage\n";
         let starts = parse_ps(out);
         assert_eq!(starts.len(), 2);
@@ -400,7 +352,6 @@ pub(crate) mod tests {
 
     #[test]
     fn scan_reads_only_pid_records() {
-        // Defect: a `.key` file (a secret) or the heartbeat opened as a registry record.
         let home = Scratch::new("registry-scan");
         let dir = ConfigDir(home.path().join(".claude"));
         home.write(".claude/sessions/4242.json", &fixture("interactive_waiting.json"));
@@ -414,8 +365,6 @@ pub(crate) mod tests {
 
     #[test]
     fn discovery_finds_default_suffixed_and_env_dirs_once() {
-        // Defects: a second config dir missed (gotcha 1), a `.claude-*` without sessions treated
-        // as a config dir, or $CLAUDE_CONFIG_DIR naming a known dir listed twice.
         let home = Scratch::new("registry-discover");
         home.mkdir(".claude/sessions");
         home.mkdir(".claude-personal/sessions");

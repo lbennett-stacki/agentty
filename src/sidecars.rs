@@ -1,14 +1,8 @@
-//! Boundaries for the small per-session side files: the task list, the optional statusline
-//! cache, team configs, and git repo roots for auto-grouping. Each is one pure `parse_*` plus a
-//! stamp-gated reader in `World`.
-
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::model::{At, ConfigDir, PaneId, Problem, SafeText, SessionId};
-
-// --- tasks/<listId>/<n>.json --------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Task {
@@ -52,27 +46,19 @@ pub fn parse_task(bytes: &[u8]) -> Result<Task, Problem> {
     })
 }
 
-/// `<dir>/tasks/<sid>/`. Only `^\d+\.json$` files; `.lock`, `.highwatermark` ignored. An empty or
-/// missing dir means "nothing open" (lists self-erase when complete, gotcha 27).
 pub fn task_dir(dir: &ConfigDir, sid: &SessionId) -> PathBuf {
     dir.0.join("tasks").join(&sid.0)
 }
 
-/// `<dir>/tasks/`; a notify watch target.
 pub fn tasks_root(dir: &ConfigDir) -> PathBuf {
     dir.0.join("tasks")
 }
 
-// --- ~/.cache/agentically/statusline/<sid>.json (opt-in tee) ------------------------------------
-
-/// Exact values from the user's statusline, when they installed the tee. The only source of a
-/// context *percentage* and of a live cost.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Statusline {
     pub ctx_used_pct: Option<f64>,
     pub window: Option<u64>,
     pub cost_usd: Option<f64>,
-    /// File mtime. Used only if newer than the transcript's latest usage (else stale).
     pub at: At,
 }
 
@@ -103,7 +89,6 @@ pub fn parse_statusline(bytes: &[u8], mtime: At) -> Result<Statusline, Problem> 
     })
 }
 
-/// `<cache>/statusline/`; a notify watch target.
 pub fn statusline_dir(cache_root: &Path) -> PathBuf {
     cache_root.join("statusline")
 }
@@ -112,8 +97,6 @@ pub fn statusline_path(cache_root: &Path, sid: &SessionId) -> PathBuf {
     statusline_dir(cache_root).join(format!("{}.json", sid.0))
 }
 
-// --- <dir>/teams/<team>/config.json -----------------------------------------------------------
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Team {
     pub name: String,
@@ -121,7 +104,6 @@ pub struct Team {
     pub members: Vec<TeamMember>,
 }
 
-/// Split-pane members never write a registry record; they appear only here.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TeamMember {
     pub name: String,
@@ -156,7 +138,6 @@ pub fn parse_team(bytes: &[u8]) -> Result<Team, Problem> {
             .flatten()
             .map(|m| TeamMember {
                 name: m.name.unwrap_or_default(),
-                // "leader", "in-process" and iTerm ids are not tmux panes.
                 pane: m.tmux_pane_id.as_deref().and_then(PaneId::parse),
                 active: m.is_active.unwrap_or(false),
             })
@@ -164,16 +145,9 @@ pub fn parse_team(bytes: &[u8]) -> Result<Team, Problem> {
     })
 }
 
-// --- git repo root for auto-grouping ----------------------------------------------------------
-
-/// The main worktree root containing `cwd`, by walking up to the first `.git`. A `.git` *file*
-/// (`gitdir: <main>/.git/worktrees/<name>`) is a linked worktree: fold it into `<main>`. No
-/// subprocess; `World` caches the answer per cwd for the life of the process.
 pub fn repo_root(cwd: &Path) -> Option<PathBuf> {
     let (dir, dot_git) = cwd.ancestors().map(|d| (d, d.join(".git"))).find(|(_, g)| g.exists())?;
     let root = if dot_git.is_file() { linked_main(dir, &dot_git) } else { dir.to_path_buf() };
-    // Canonical, so a worktree whose gitdir git wrote as a realpath (`/private/var/...`) and the
-    // main checkout seen through a symlink (`/var/...`) land in one group.
     Some(std::fs::canonicalize(&root).unwrap_or(root))
 }
 
@@ -202,7 +176,6 @@ mod tests {
 
     #[test]
     fn task_parses_string_or_numeric_ids_and_unknown_status() {
-        // Defects: a numeric id or a new status value dropping the task from the detail pane.
         let t = parse_task(br#"{"id":"3","subject":"Write the parser","description":"x","status":"in_progress","blocks":[]}"#).unwrap();
         assert_eq!((t.id, t.subject.as_str(), t.status), (3, "Write the parser", TaskStatus::InProgress));
         let t = parse_task(br#"{"id":4,"subject":"Ship","status":"deferred"}"#).unwrap();
@@ -212,15 +185,12 @@ mod tests {
 
     #[test]
     fn task_subject_is_redacted() {
-        // Defect: a token pasted into a task subject reaching the screen.
         let t = parse_task(br#"{"id":"1","subject":"Rotate ghp_0123456789abcdefghijABCDEFGHIJ0123 now"}"#).unwrap();
         assert_eq!(t.subject.as_str(), "Rotate … now");
     }
 
     #[test]
     fn statusline_takes_exact_values_and_tolerates_missing_parts() {
-        // Defects: the window size or cost guessed when the tee lacks them, or a partial
-        // statusline JSON rejected outright.
         let s = parse_statusline(
             br#"{"session_id":"s","context_window":{"used_percentage":12.5,"context_window_size":200000,"total_input_tokens":25000},"cost":{"total_cost_usd":0.75},"model":{"display_name":"X"}}"#,
             At(7),
@@ -234,7 +204,6 @@ mod tests {
 
     #[test]
     fn team_members_keep_only_real_tmux_panes() {
-        // Defect: "leader" or "in-process" treated as a pane id, so Enter jumps nowhere.
         let bytes = std::fs::read(format!("{}/tests/fixtures/sidecars/team_config.json", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let team = parse_team(&bytes).unwrap();
         assert_eq!(team.name, "session-0a1b2c3d");
@@ -245,7 +214,6 @@ mod tests {
 
     #[test]
     fn linked_worktrees_fold_into_the_main_repo() {
-        // Defect: each worktree of one repo forming its own group.
         let tmp = Scratch::new("sidecars-repo");
         let main = tmp.path().join("demo");
         tmp.mkdir("demo/.git/worktrees/fees");
@@ -262,8 +230,6 @@ mod tests {
 
     #[test]
     fn submodule_and_bare_layouts_resolve_to_their_own_repo() {
-        // Defects: a submodule folded into its superproject's `.git/modules` dir, or a bare
-        // repo's worktree grouped under the bare repo's parent.
         let tmp = Scratch::new("sidecars-layouts");
         tmp.mkdir("super/.git/modules/lib");
         tmp.write("super/lib/.git", b"gitdir: ../.git/modules/lib\n");
@@ -276,7 +242,6 @@ mod tests {
 
     #[test]
     fn cwd_outside_any_repo_has_no_root() {
-        // Defect: a cwd outside git grouped under some unrelated ancestor.
         let tmp = Scratch::new("sidecars-norepo");
         tmp.mkdir("plain/dir");
         assert_eq!(repo_root(&tmp.path().join("plain/dir")), None);

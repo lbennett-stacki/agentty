@@ -1,9 +1,3 @@
-//! Pure derivation: observed facts -> `Snapshot`. No IO, no clock (time is a parameter), no
-//! user state (labels and groups are applied by `ui::layout`). Every product decision about
-//! status, title, now-line, tree and auto-grouping lives here, as small functions over
-//! `SessionView`, so fixture tests pin each one. This module never imports `world`: the
-//! observer builds `SessionView`s and hands them in.
-
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -18,9 +12,6 @@ use crate::sidecars::{Statusline, Task, TaskStatus, Team};
 use crate::subagents::{AgentMeta, Subagents};
 use crate::transcript::{BgKind, Facts, Turn};
 
-/// Everything derive needs about one live session, borrowed from `World`. All fields are plain
-/// references to parsed domain values, so tests construct a `SessionView` directly from
-/// fixture parses without a `World`.
 #[derive(Clone, Copy)]
 pub struct SessionView<'a> {
     pub dir: &'a ConfigDir,
@@ -32,11 +23,9 @@ pub struct SessionView<'a> {
     pub statusline: Option<&'a Statusline>,
     pub team: Option<&'a Team>,
     pub repo: Option<&'a Path>,
-    /// The tmux pane snapshot of this refresh. `open_target` offers a pane only if it is here.
     pub panes: &'a [PaneInfo],
 }
 
-/// A bg job with no live process, retired within the window.
 #[derive(Clone, Copy)]
 pub struct ExitedView<'a> {
     pub dir: &'a ConfigDir,
@@ -44,19 +33,10 @@ pub struct ExitedView<'a> {
     pub facts: Option<&'a Facts>,
 }
 
-/// One subagent as `Subagents::agents` yields it: meta, rule-derived state, and the sidecar
-/// fold while it runs. The decision functions take these as a slice so the agent-state rule
-/// stays in `subagents` and tests can supply agents without a subagents dir on disk.
 pub type AgentView<'a> = (&'a AgentMeta, NodeState, Option<&'a Facts>);
 
-/// `job.detail` stands in for the now-line while the classifier wrote it this recently.
 const DETAIL_FRESH_MS: i64 = 2 * 60 * 1000;
 
-/// Build the whole snapshot. Runs on every loop iteration that refreshed; with 20 sessions it is
-/// microseconds, so there is no incremental derive and no cache to invalidate.
-/// Rows: every non-hidden live session via `live_row`, every exited job via `exited_row`.
-/// Diagnostics: `world_diagnostics` plus one `UnknownValue` per row whose registry status,
-/// kind, job state or fan kind was `Other`.
 pub fn snapshot<'a>(
     sessions: impl Iterator<Item = SessionView<'a>>,
     exited: impl Iterator<Item = ExitedView<'a>>,
@@ -108,7 +88,6 @@ fn unknown_values(dir: &ConfigDir, reg: Option<&RegEntry>, job: Option<&Job>, ou
     }
 }
 
-/// The subagents of a live session, with their rule-derived states.
 pub fn agents<'a>(v: &SessionView<'a>) -> Vec<AgentView<'a>> {
     match (v.subagents, v.facts) {
         (Some(s), Some(f)) => s.agents(f, true).collect(),
@@ -187,28 +166,6 @@ fn outcome_word(o: JobOutcome) -> &'static str {
     }
 }
 
-/// THE status table (GROUNDING 3.3). Returns the status and its `since`.
-///
-/// ```text
-/// registry      transcript / job                              -> Status                   since
-/// waiting(w)    -                                             -> NeedsYou(need_of(w))     statusUpdatedAt
-/// busy          no transcript                                 -> Working                  statusUpdatedAt
-/// busy          turn Open                                     -> Working                  max(statusUpdatedAt, turn.since)
-/// busy          turn Closed/Interrupted                       -> Parked(parked())         turn end
-/// busy          turn Unknown, tail is an unfinished tool call -> Working                  statusUpdatedAt
-/// busy          turn Unknown, otherwise                       -> Parked(parked())         statusUpdatedAt
-/// shell         -                                             -> Parked(parked())         statusUpdatedAt
-/// idle          bg: tempo Blocked && needs                    -> NeedsYou(JobQuestion)    statusUpdatedAt
-/// idle          wakeup in the future                          -> Parked(wakeup)           statusUpdatedAt
-/// idle          -                                             -> Idle{asked_question}     statusUpdatedAt
-/// Other         -                                             -> Idle{false} (+ diagnostic)
-/// ```
-/// `asked_question` = last turn Closed and `last_text.is_question`. `job.state` is never
-/// consulted for liveness or Parked-vs-Idle (it says `done` while work runs, gotcha 4).
-///
-/// Turn Unknown means the window started mid-history with no turn boundary in it (common on
-/// first sight of a long turn). A tool call with no later end-of-turn text is a turn still
-/// streaming; anything else is treated as a turn that already ended.
 pub fn status(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> (Status, At) {
     let reg_since = v.reg.status_since;
     match &v.reg.status {
@@ -251,8 +208,6 @@ fn future_wakeup(facts: Option<&Facts>, now: At) -> Option<At> {
     facts.and_then(|f| f.wakeup).filter(|w| *w > now)
 }
 
-/// `WaitingFor::Permission` -> `Need::Permission { tool }` where `tool` is the name of
-/// `facts.last_tool` if it is unanswered; every other reason -> `Need::Waiting(w)`.
 pub fn need_of(w: &WaitingFor, facts: Option<&Facts>) -> Need {
     match w {
         WaitingFor::Permission => Need::Permission {
@@ -262,19 +217,6 @@ pub fn need_of(w: &WaitingFor, facts: Option<&Facts>) -> Need {
     }
 }
 
-/// What a parked session waits on. Source precedence: bg `fan` (authoritative roster) > the
-/// transcript fold's `open_bg` > `turn.pending_agents`. Fan counts are `Exact`. Fold shell and
-/// monitor counts are `Exact` only when the fold saw the whole file, else `AtLeast`. Fold agents
-/// = max(open_bg agents, running tree agents, pending_agents), since pending_agents also counts
-/// depth-2 agents the fold cannot see; the subagents dir is listed in full, so this is `Exact`
-/// when it is known, else follows the horizon.
-///
-/// The registry then sets floors and ceilings, so `Parked::new` always succeeds:
-/// - `shell`: no agent or workflow is running (it would say `busy`), and a local_bash or monitor
-///   is, so agents and workflows are zeroed and an empty shell+monitor count becomes
-///   `shells: AtLeast(1)`;
-/// - `busy` with a closed turn: an agent or workflow is running, so an empty agent+workflow
-///   count becomes `agents: AtLeast(1)`.
 pub fn parked(v: &SessionView<'_>, agents: &[AgentView<'_>], registry_says_shell: bool, now: At) -> Parked {
     let (mut n_agents, n_shells, n_monitors, mut n_workflows) = match v.job {
         Some(job) => {
@@ -314,10 +256,6 @@ pub fn parked(v: &SessionView<'_>, agents: &[AgentView<'_>], registry_says_shell
         .expect("the registry floors above guarantee a positive count")
 }
 
-/// Title precedence (SPEC; GROUNDING 3.4), user label excluded (applied by `ui::layout`):
-/// custom-title > agent-name > registry name (source User|Auto) > ai-title > job name >
-/// registry name (any source) > short sessionId. The head-scan "first prompt" fallback is
-/// omitted: SPEC forbids full scans.
 pub fn title(v: &SessionView<'_>) -> SafeText {
     let sid = &v.reg.session_id.0;
     pick_title(v.facts, v.reg.name.as_ref(), v.job, &sid[..sid.len().min(8)])
@@ -340,14 +278,6 @@ fn pick_title(facts: Option<&Facts>, reg_name: Option<&Name>, job: Option<&Job>,
     .unwrap_or_else(|| SafeText::redact(fallback))
 }
 
-/// The second line, specific to the status (GROUNDING 3.5):
-/// - NeedsYou(Permission{tool}): "permission prompt · <tool>: <summary of the dangling tool_use>"
-/// - NeedsYou(Waiting(w)): w.label()
-/// - NeedsYou(JobQuestion): the question text
-/// - Working: the latest of last_tool ("<tool>: <summary>") and last_text (first line)
-/// - Parked: "waiting on 3 agents, 1+ shell, 1 monitor · wakes 14:05" (`describe_parked`)
-/// - Idle: away_summary ?? last_text ?? last_prompt
-/// - bg rows: job.detail replaces Working/Idle text when job.updated_at is within 2 minutes.
 pub fn now_line(status: &Status, v: &SessionView<'_>, now: At) -> SafeText {
     let fresh_detail = v
         .job
@@ -379,8 +309,6 @@ pub fn now_line(status: &Status, v: &SessionView<'_>, now: At) -> SafeText {
     }
 }
 
-/// The latest thing a fold shows the agent doing: its last tool call or its last text,
-/// whichever is newer.
 fn doing(f: &Facts) -> Option<SafeText> {
     let tool = f.last_tool.as_ref().map(|t| (t.at, tool_line(&t.name, &t.summary)));
     let text = f.last_text.as_ref().map(|t| (t.at, t.first_line.clone()));
@@ -398,14 +326,6 @@ fn tool_line(name: &str, summary: &SafeText) -> SafeText {
     }
 }
 
-/// Expandable tree (depth 2): agents placed by `parent`; open shells, monitors and workflows as
-/// leaves; a pending wakeup as a leaf. Every agent that is not Running collapses into
-/// `Tree::finished` at its level: a cold start on a pstack session otherwise lists every
-/// grandchild of a long-finished agent as a live Orphaned node.
-///
-/// For bg rows `fan` is the authoritative roster (GROUNDING 3.9): an agent with a fan entry is
-/// Running while that entry is open and Finished once it has `doneAt`, whatever its sidecar
-/// shows; fan agents with no meta still appear; leaves come from `fan`, not `open_bg`.
 pub fn tree(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> Tree {
     let known: HashSet<&AgentId> = agents.iter().map(|(m, _, _)| &m.id).collect();
     let mut t = agent_level(v, agents, &known, None, 0);
@@ -450,7 +370,6 @@ fn agent_level(
     depth: u8,
 ) -> Tree {
     let mut t = Tree::default();
-    // Real data has depth <= 2; the cap only stops a malformed self-parent from recursing forever.
     if depth > 2 {
         return t;
     }
@@ -489,8 +408,6 @@ fn fan_state(f: &FanItem) -> NodeState {
     }
 }
 
-/// Launch time: the launching fold's `open_bg` (main file, or a parent agent's sidecar for
-/// depth 2), else the fan entry, else the agent's own first record.
 fn agent_started(v: &SessionView<'_>, agents: &[AgentView<'_>], id: &AgentId, own: Option<&Facts>) -> At {
     let task = TaskId::from(id);
     v.facts
@@ -517,8 +434,6 @@ struct RosterItem<'a> {
     since: Option<At>,
 }
 
-/// Open background work (GROUNDING 3.10): `fan` without `doneAt` for bg rows, `open_bg`
-/// otherwise. Todos and unknown fan kinds are not background work.
 fn roster<'a>(v: &SessionView<'a>) -> Vec<RosterItem<'a>> {
     if let Some(job) = v.job {
         return job
@@ -532,8 +447,6 @@ fn roster<'a>(v: &SessionView<'a>) -> Vec<RosterItem<'a>> {
                     _ => return None,
                 };
                 let id = TaskId(f.id.clone());
-                // A fan shell label is the command line (redacted to little more than the
-                // program name); the transcript's launch carries the tool's description.
                 let described = v.facts.and_then(|facts| facts.open_bg.get(&id)).map(|b| &b.label);
                 Some(RosterItem { label: described.unwrap_or(&f.label), id, kind, since: f.started_at })
             })
@@ -555,10 +468,6 @@ fn roster<'a>(v: &SessionView<'a>) -> Vec<RosterItem<'a>> {
         .collect()
 }
 
-/// Right-aligned meta. The statusline is used only when it is at least as new as the latest
-/// usage record (else it is stale). ctx: statusline percent when it reports a window, else
-/// absolute tokens from `facts.usage`. cost: statusline (Live), else a trailing `cost-state`
-/// (Final), else none; never estimated.
 pub fn meta(v: &SessionView<'_>) -> Meta {
     let usage = v.facts.and_then(|f| f.usage.as_ref());
     let statusline = v.statusline.filter(|s| usage.is_none_or(|u| s.at >= u.at));
@@ -641,10 +550,6 @@ pub fn detail(v: &SessionView<'_>, now: At) -> Detail {
     }
 }
 
-/// Enter's behaviour, decided once per row:
-/// bg (has a job id) -> Attach; interactive + pane present in `v.panes` -> Pane; otherwise
-/// Unreachable, naming the pane that is gone or the surface it runs in (VS Code, Desktop, a
-/// terminal outside tmux).
 pub fn open_target(v: &SessionView<'_>, title: &SafeText) -> OpenTarget {
     if let Some(job) = &v.reg.job {
         return OpenTarget::Attach { dir: v.dir.clone(), job: job.clone(), title: title.as_str().to_owned() };
@@ -664,8 +569,6 @@ pub fn open_target(v: &SessionView<'_>, title: &SafeText) -> OpenTarget {
     }
 }
 
-/// Automatic group: team (session is the lead, or a member by pane) > repo root > Elsewhere.
-/// The user's assignment, applied in `ui::layout`, overrides this.
 pub fn auto_group(v: &SessionView<'_>) -> AutoGroup {
     if let Some(team) = v.team {
         let lead = team.lead.as_ref() == Some(&v.reg.session_id);
@@ -680,8 +583,6 @@ pub fn auto_group(v: &SessionView<'_>) -> AutoGroup {
     }
 }
 
-/// Render-ready "3 agents, 1+ shell, 1 monitor · wakes 14:05". Zero counts omitted;
-/// `AtLeast(n)` renders `n+`.
 pub fn describe_parked(p: &Parked) -> String {
     let counted = [
         (p.agents(), "agent"),
@@ -709,15 +610,12 @@ pub fn describe_parked(p: &Parked) -> String {
     out
 }
 
-/// Local wall-clock `HH:MM`.
 fn clock(at: At) -> String {
     chrono::DateTime::from_timestamp_millis(at.0)
         .map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string())
         .unwrap_or_default()
 }
 
-/// Map a job's terminal classifier state to the Exited outcome. Non-terminal states on a dead
-/// process are Unknown (it crashed or was killed mid-flight).
 pub fn job_outcome(job: &Job) -> JobOutcome {
     match job.state {
         JobState::Done => JobOutcome::Done,
@@ -820,7 +718,6 @@ mod tests {
         }
     }
 
-    /// Owns everything a `SessionView` borrows.
     struct Fx {
         dir: ConfigDir,
         reg: RegEntry,
@@ -878,11 +775,8 @@ mod tests {
         }
     }
 
-    // --- the status table (GROUNDING 3.3), one test per row ------------------------------------
-
     #[test]
     fn waiting_permission_names_the_dangling_tool_and_shows_it_on_the_now_line() {
-        // Defect: the tool name lost, so the row says "permission prompt" with no hint of what for.
         let fx = Fx::new(reg(RegStatus::Waiting(WaitingFor::Permission)))
             .with_facts(|f| f.last_tool = Some(tool("Bash", "Run migration against staging", false, at(-3))));
         let (st, since) = fx.status();
@@ -893,7 +787,6 @@ mod tests {
 
     #[test]
     fn waiting_permission_with_an_answered_tool_names_no_tool() {
-        // Defect: a faked tool name taken from a call that already finished.
         let fx = Fx::new(reg(RegStatus::Waiting(WaitingFor::Permission)))
             .with_facts(|f| f.last_tool = Some(tool("Read", "main.rs", true, at(-3))));
         let (st, _) = fx.status();
@@ -903,7 +796,6 @@ mod tests {
 
     #[test]
     fn waiting_for_any_other_reason_keeps_the_registry_reason() {
-        // Defect: an unknown waitingFor dropping the row out of NeedsYou or losing its text.
         for (w, shown) in [
             (WaitingFor::Input, "input needed"),
             (WaitingFor::Unspecified, "waiting"),
@@ -918,21 +810,17 @@ mod tests {
 
     #[test]
     fn busy_with_no_transcript_is_working() {
-        // Defect: a session whose transcript is missing shown as parked on invented agents.
         assert_eq!(Fx::new(reg(RegStatus::Busy)).status(), (Status::Working, at(0)));
     }
 
     #[test]
     fn busy_with_an_open_turn_is_working_since_the_turn_opened() {
-        // Defect: a turn opened by a task notification while the registry stayed busy shows the
-        // elapsed time of the earlier busy stretch.
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.turn = Turn::Open { since: at(40) });
         assert_eq!(fx.status(), (Status::Working, at(40)));
     }
 
     #[test]
     fn busy_with_a_closed_turn_is_parked_and_its_since_is_the_turn_end_not_status_updated_at() {
-        // Defect: Parked inheriting statusUpdatedAt, which does not move across Working -> Parked.
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
             f.turn = Turn::Closed { at: at(90), pending_agents: 2 };
         });
@@ -944,7 +832,6 @@ mod tests {
 
     #[test]
     fn busy_after_an_interrupt_is_parked_since_the_interrupt() {
-        // Defect: an interrupted turn (no turn_duration) stuck as Working forever.
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.turn = Turn::Interrupted { at: at(12) });
         let (st, since) = fx.status();
         assert!(matches!(st, Status::Parked(_)), "{st:?}");
@@ -953,7 +840,6 @@ mod tests {
 
     #[test]
     fn busy_with_no_turn_boundary_in_the_window_follows_the_tail() {
-        // Defect: a long turn first seen mid-stream shown as parked, or a finished one as working.
         let streaming = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
             f.last_tool = Some(tool("Bash", "Run tests", false, at(-2)));
         });
@@ -969,7 +855,6 @@ mod tests {
 
     #[test]
     fn shell_with_no_visible_launch_is_parked_on_at_least_one_shell() {
-        // Defect: "parked on nothing", or an exact count claimed for a launch we never saw.
         let fx = Fx::new(reg(RegStatus::Shell)).with_facts(|_| {});
         let p = fx.parked();
         assert_eq!((p.shells(), p.agents(), p.monitors()), (Count::AtLeast(1), Count::Exact(0), Count::AtLeast(0)));
@@ -979,7 +864,6 @@ mod tests {
 
     #[test]
     fn shell_trusts_the_registry_over_a_done_job_state() {
-        // Defect: trusting the classifier (gotcha 4): job.state "done" while a shell still runs.
         let mut fx = Fx::new(bg_reg(RegStatus::Shell));
         fx.job = Some(Job { state: JobState::Done, tempo: Some(Tempo::Idle), fan: vec![fan("b1", FanKind::Shell, false)], ..job() });
         assert_eq!(fx.parked().shells(), Count::Exact(1));
@@ -987,7 +871,6 @@ mod tests {
 
     #[test]
     fn shell_never_shows_agents_from_a_stale_fold() {
-        // Defect: "waiting on 2 agents" when the registry proves no agent runs (it would say busy).
         let fx = Fx::new(reg(RegStatus::Shell)).with_facts(|f| {
             f.horizon = Horizon { from_start: true, first_at: None };
             f.open_bg.insert(TaskId("a1".into()), bg(BgKind::Agent, "stale"));
@@ -1000,7 +883,6 @@ mod tests {
 
     #[test]
     fn idle_bg_job_blocked_with_a_question_needs_you() {
-        // Defect: a bg job waiting on the user's answer shown as idle.
         let mut fx = Fx::new(bg_reg(RegStatus::Idle));
         fx.job = Some(Job { tempo: Some(Tempo::Blocked), needs: Some(SafeText::ours("Ship to prod?")), ..job() });
         let (st, _) = fx.status();
@@ -1010,7 +892,6 @@ mod tests {
 
     #[test]
     fn job_needs_are_ignored_unless_the_registry_says_idle() {
-        // Defect: a stale classifier question promoting a parked or working session to NeedsYou.
         for status in [RegStatus::Busy, RegStatus::Shell] {
             let mut fx = Fx::new(bg_reg(status)).with_facts(|f| f.turn = Turn::Closed { at: at(5), pending_agents: 1 });
             fx.job = Some(Job { tempo: Some(Tempo::Blocked), needs: Some(SafeText::ours("Old question?")), ..job() });
@@ -1023,7 +904,6 @@ mod tests {
 
     #[test]
     fn idle_with_a_future_wakeup_is_parked_on_the_wakeup_only() {
-        // Defect: a scheduled session shown idle; or stale fold items shown under an idle registry.
         let fx = Fx::new(reg(RegStatus::Idle)).with_facts(|f| {
             f.wakeup = Some(at(600));
             f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Shell, "stale"));
@@ -1038,7 +918,6 @@ mod tests {
 
     #[test]
     fn idle_ending_on_a_question_is_idle_asked_question_never_needs_you() {
-        // Defect: the prose-question heuristic promoted to NeedsYou (SYNTHESIS ruling 4).
         let fx = Fx::new(reg(RegStatus::Idle)).with_facts(|f| {
             f.turn = Turn::Closed { at: at(-10), pending_agents: 0 };
             f.last_text = Some(text("Want me to wire the statusline tee now?", at(-11)));
@@ -1054,7 +933,6 @@ mod tests {
 
     #[test]
     fn unknown_registry_status_is_idle_and_reported() {
-        // Defect: a new Claude status crashing the row or vanishing silently.
         let fx = Fx::new(reg(RegStatus::Other("napping".into())));
         assert_eq!(fx.status().0, Status::Idle { asked_question: false });
         let snap = snapshot([fx.view()].into_iter(), std::iter::empty(), &[], T0);
@@ -1065,11 +943,8 @@ mod tests {
         );
     }
 
-    // --- parked counts --------------------------------------------------------------------------
-
     #[test]
     fn bg_fan_roster_wins_over_a_stale_fold() {
-        // Defect: the fold's missed completions preferred over the authoritative roster.
         let mut fx = Fx::new(bg_reg(RegStatus::Busy)).with_facts(|f| {
             f.turn = Turn::Closed { at: at(5), pending_agents: 0 };
             for id in ["b1", "b2", "b3"] {
@@ -1090,7 +965,6 @@ mod tests {
 
     #[test]
     fn pending_background_agents_beat_a_smaller_fold_count() {
-        // Defect: depth-2 agents (counted only by pendingBackgroundAgentCount) missing.
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
             f.turn = Turn::Closed { at: at(5), pending_agents: 3 };
             f.open_bg.insert(TaskId("a1".into()), bg(BgKind::Agent, "one we saw"));
@@ -1100,7 +974,6 @@ mod tests {
 
     #[test]
     fn running_tree_agents_count_toward_parked_agents() {
-        // Defect: agents launched before the window invisible although their sidecars run.
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.turn = Turn::Closed { at: at(5), pending_agents: 0 });
         let (m1, m2, m3) = (agent_meta("a1", None), agent_meta("a2", None), agent_meta("a3", None));
         let agents: Vec<AgentView<'_>> = vec![
@@ -1113,14 +986,12 @@ mod tests {
 
     #[test]
     fn busy_with_a_closed_turn_and_no_evidence_is_parked_on_at_least_one_agent() {
-        // Defect: "parked on nothing" (or a panic in Parked::new) when the launch predates the window.
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.turn = Turn::Closed { at: at(5), pending_agents: 0 });
         assert_eq!(fx.parked().agents(), Count::AtLeast(1));
     }
 
     #[test]
     fn a_fold_that_saw_the_whole_file_reports_exact_counts() {
-        // Defect: "1+" shown when every launch is in view.
         let fx = Fx::new(reg(RegStatus::Shell)).with_facts(|f| {
             f.horizon = Horizon { from_start: true, first_at: None };
             f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Shell, "dev server"));
@@ -1131,7 +1002,6 @@ mod tests {
 
     #[test]
     fn describe_parked_pluralises_marks_lower_bounds_and_omits_zeros() {
-        // Defect: "1 agents", "0 shells", or a lower bound shown as exact.
         let p = Parked::new(Count::Exact(3), Count::AtLeast(1), Count::Exact(0), 1, None).unwrap();
         assert_eq!(describe_parked(&p), "3 agents, 1+ shell, 1 workflow");
         let p = Parked::new(Count::Exact(1), Count::Exact(0), Count::Exact(2), 0, Some(at(60))).unwrap();
@@ -1139,11 +1009,8 @@ mod tests {
         assert!(s.starts_with("1 agent, 2 monitors · wakes "), "{s}");
     }
 
-    // --- title ----------------------------------------------------------------------------------
-
     #[test]
     fn title_precedence_custom_agent_name_strong_registry_name_ai_job_name_any_name_short_sid() {
-        // Defect: a stale or weaker title winning over a stronger one (GROUNDING 3.4).
         let mut fx = Fx::new(bg_reg(RegStatus::Idle)).with_facts(|f| {
             f.titles = Titles {
                 custom: Some(SafeText::ours("custom")),
@@ -1176,17 +1043,13 @@ mod tests {
 
     #[test]
     fn auto_named_registry_title_beats_ai_title() {
-        // Defect: nameSource auto (bg Haiku name) ranked like a derived name.
         let mut fx = Fx::new(reg(RegStatus::Idle)).with_facts(|f| f.titles.ai = Some(SafeText::ours("ai")));
         fx.reg.name = Some(Name { value: "auto-name".into(), source: NameSource::Auto });
         assert_eq!(title(&fx.view()).as_str(), "auto-name");
     }
 
-    // --- now-line -------------------------------------------------------------------------------
-
     #[test]
     fn working_now_line_is_the_latest_action() {
-        // Defect: an old assistant sentence shown while a newer tool runs, or vice versa.
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
             f.turn = Turn::Open { since: at(-60) };
             f.last_text = Some(text("Let me check the tests.", at(-20)));
@@ -1197,7 +1060,6 @@ mod tests {
 
     #[test]
     fn idle_now_line_prefers_away_summary_then_last_text_then_last_prompt() {
-        // Defect: the recap ignored, or a blank line when only the prompt is known.
         let idle = Status::Idle { asked_question: false };
         let mut fx = Fx::new(reg(RegStatus::Idle)).with_facts(|f| {
             f.away_summary = Some(SafeText::ours("Fee logic done; client-side next"));
@@ -1213,7 +1075,6 @@ mod tests {
 
     #[test]
     fn bg_job_detail_replaces_the_now_line_only_while_fresh() {
-        // Defect: a 40-minute-old classifier verdict shown as what the job is doing now (gotcha 4).
         let mut fx = Fx::new(bg_reg(RegStatus::Busy)).with_facts(|f| {
             f.turn = Turn::Open { since: at(-60) };
             f.last_tool = Some(tool("Grep", "broken anchors", false, at(-5)));
@@ -1223,8 +1084,6 @@ mod tests {
         fx.job.as_mut().unwrap().updated_at = Some(at(-40 * 60));
         assert_eq!(now_line(&Status::Working, &fx.view(), T0).as_str(), "Grep: broken anchors");
     }
-
-    // --- meta: never an unauthoritative cost or percent ----------------------------------------
 
     fn usage_at(t: At) -> Usage {
         Usage { ctx_tokens: 412_000, model: "claude-opus-5-5".into(), at: t }
@@ -1236,7 +1095,6 @@ mod tests {
 
     #[test]
     fn never_shows_a_cost_or_percent_without_an_authoritative_source() {
-        // Defect: a guessed window (200k default) or an estimated cost reaching the screen.
         let no_statusline = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.usage = Some(usage_at(at(-5))));
         let m = meta(&no_statusline.view());
         assert_eq!((m.ctx, m.cost), (Some(Ctx::Tokens(412_000)), None));
@@ -1257,7 +1115,6 @@ mod tests {
 
     #[test]
     fn a_fresh_statusline_gives_percent_and_live_cost() {
-        // Defect: the opted-in statusline tee ignored.
         let mut fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.usage = Some(usage_at(at(-5))));
         fx.statusline = Some(statusline(at(-1), Some(1_000_000)));
         let m = meta(&fx.view());
@@ -1269,7 +1126,6 @@ mod tests {
 
     #[test]
     fn a_trailing_cost_state_gives_a_final_cost() {
-        // Defect: the exact exit cost dropped from a finished job's row.
         let mut facts = Facts::default();
         facts.exit = Some(ExitTotals { cost_usd: 2.17 });
         let dir = ConfigDir(PathBuf::from("/home/u/.claude"));
@@ -1283,7 +1139,6 @@ mod tests {
 
     #[test]
     fn meta_merges_prs_falls_back_for_branch_and_flags_remote_control_and_dir() {
-        // Defect: duplicate PRs; a missing branch on bg worktree rows; RC or dir tag lost.
         let mut fx = Fx::new(bg_reg(RegStatus::Idle)).with_facts(|f| f.prs = vec![4790, 4812]);
         fx.dir = ConfigDir(PathBuf::from("/home/u/.claude-personal"));
         fx.job = Some(Job {
@@ -1301,12 +1156,8 @@ mod tests {
         assert_eq!(m.dir_tag, "personal");
     }
 
-    // --- tree -----------------------------------------------------------------------------------
-
     #[test]
     fn tree_nests_depth_two_agents_and_collapses_finished_per_level() {
-        // Defect: depth-2 agents flattened to the top, or finished, killed or orphaned agents
-        // listed as live.
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
             f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Monitor, "Watch CI"));
         });
@@ -1338,7 +1189,6 @@ mod tests {
 
     #[test]
     fn running_agent_shows_its_sidecar_action_and_launch_time() {
-        // Defect: a running child with a blank now-line, or its age measured from the wrong clock.
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
             f.open_bg.insert(TaskId("a1".into()), bg(BgKind::Agent, "audit"));
         });
@@ -1353,7 +1203,6 @@ mod tests {
 
     #[test]
     fn bg_tree_takes_liveness_and_leaves_from_the_fan() {
-        // Defect: the fold or a sidecar overriding the authoritative bg roster (GROUNDING 3.9).
         let mut fx = Fx::new(bg_reg(RegStatus::Busy)).with_facts(|f| {
             f.open_bg.insert(TaskId("bstale".into()), bg(BgKind::Shell, "stale shell"));
         });
@@ -1377,8 +1226,6 @@ mod tests {
 
     #[test]
     fn bg_shell_leaves_use_the_launch_description_over_the_fan_command() {
-        // Defect: a bg row's shells shown as their bare program name ("until", "gh") when the
-        // transcript has the Bash description for the same task id.
         let mut fx = Fx::new(bg_reg(RegStatus::Shell)).with_facts(|f| {
             f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Shell, "Wait for CI on main"));
         });
@@ -1391,17 +1238,13 @@ mod tests {
 
     #[test]
     fn a_future_wakeup_is_a_tree_leaf() {
-        // Defect: a scheduled wakeup invisible when the row is expanded.
         let fx = Fx::new(reg(RegStatus::Idle)).with_facts(|f| f.wakeup = Some(at(300)));
         let t = tree(&fx.view(), &[], T0);
         assert_eq!(t.live.iter().map(|n| n.kind.clone()).collect::<Vec<_>>(), [NodeKind::Wakeup]);
     }
 
-    // --- open target ----------------------------------------------------------------------------
-
     #[test]
     fn open_target_offers_a_pane_only_when_tmux_lists_it() {
-        // Defect: Enter offered for a pane that is gone (gotcha 31).
         let mut fx = Fx::new(reg(RegStatus::Idle));
         let t = SafeText::ours("t");
         fx.panes = vec![PaneInfo { id: PaneId::parse("%7").unwrap(), pid: Pid(1) }];
@@ -1412,7 +1255,6 @@ mod tests {
 
     #[test]
     fn open_target_outside_tmux_names_the_surface() {
-        // Defect: a VS Code session offered a jump, or a silent no-op with no reason.
         let mut fx = Fx::new(RegEntry { pane: None, entrypoint: "claude-vscode".into(), ..reg(RegStatus::Idle) });
         let t = SafeText::ours("t");
         assert_eq!(open_target(&fx.view(), &t), OpenTarget::Unreachable("running in VS Code".into()));
@@ -1422,7 +1264,6 @@ mod tests {
 
     #[test]
     fn open_target_attaches_bg_jobs_live_or_exited() {
-        // Defect: a bg row (no tmux pane by design) marked unreachable.
         let fx = Fx::new(bg_reg(RegStatus::Busy));
         let expected = OpenTarget::Attach { dir: fx.dir.clone(), job: JobId("9b3323e1".into()), title: "t".into() };
         assert_eq!(open_target(&fx.view(), &SafeText::ours("t")), expected);
@@ -1432,11 +1273,8 @@ mod tests {
         assert_eq!(row.open, expected);
     }
 
-    // --- grouping and the snapshot ---------------------------------------------------------------
-
     #[test]
     fn auto_group_prefers_team_then_repo_then_elsewhere() {
-        // Defect: a team member split from its team, or a non-member pulled into one.
         let mut fx = Fx::new(reg(RegStatus::Idle));
         assert_eq!(auto_group(&fx.view()), AutoGroup::Elsewhere);
         fx.repo = Some(PathBuf::from("/work/repo"));
@@ -1450,7 +1288,6 @@ mod tests {
 
     #[test]
     fn snapshot_hides_spares_keys_bg_rows_by_job_and_reports_unknown_job_values() {
-        // Defect: a spare or parked record rendered; bg labels keyed by a changing sessionId.
         let hidden = Fx::new(RegEntry { hidden: true, ..reg(RegStatus::Idle) });
         let mut live_bg = Fx::new(bg_reg(RegStatus::Idle));
         live_bg.job = Some(Job { fan: vec![fan("x1", FanKind::Other("cron".into()), false)], ..job() });
@@ -1477,7 +1314,6 @@ mod tests {
 
     #[test]
     fn detail_lists_open_tasks_and_pending_work() {
-        // Defect: completed tasks shown as open, or pending background items missing.
         let mut fx = Fx::new(reg(RegStatus::Shell)).with_facts(|f| {
             f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Shell, "dev server"));
         });

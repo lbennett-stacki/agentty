@@ -1,13 +1,3 @@
-//! Boundary for `projects/<slug>/<sid>/subagents/` (flat at every depth; workflows under
-//! `subagents/workflows/<runId>/`). Yields `AgentMeta` plus one sidecar `Transcript` per agent
-//! that may still be running.
-//!
-//! Cost control: the dir listing is redone only when the dir's mtime changes (a new agent adds
-//! files). Each agent jsonl is pumped (one stat) only while the agent is `Running`; any other
-//! state drops its cursor but keeps the folded `Facts`, so the state rule still has the tail it
-//! saw and a finished agent is never re-opened just to learn it is finished. Sessions with 100+
-//! historical agents cost ~0 per refresh.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -21,13 +11,10 @@ pub struct AgentMeta {
     pub id: AgentId,
     pub agent_type: String,
     pub description: SafeText,
-    /// The spawning Agent tool_use in the parent file (main transcript or parent agent's jsonl).
     pub tool_use: Option<ToolUseId>,
-    /// None for depth 1 (parent is the session); Some for depth 2. Present iff depth >= 2.
     pub parent: Option<AgentId>,
     pub model: Option<String>,
     pub stopped_by_user: bool,
-    /// Set for agents under `subagents/workflows/<runId>/`.
     pub workflow_run: Option<String>,
 }
 
@@ -42,7 +29,6 @@ struct WireMeta {
     stopped_by_user: Option<bool>,
 }
 
-/// Pure parse of one `agent-<id>.meta.json`. The id comes from the filename.
 pub fn parse_meta(
     id: AgentId,
     workflow_run: Option<String>,
@@ -61,38 +47,26 @@ pub fn parse_meta(
     })
 }
 
-/// One known agent: its meta (re-parsed when the file's mtime moves) and the sidecar facts
-/// kept from the last time it had a cursor.
 struct Entry {
     meta_path: PathBuf,
     meta_mtime_ms: i64,
     meta: AgentMeta,
-    /// Facts folded while the agent had a cursor, kept after the cursor was dropped.
     kept: Option<Facts>,
 }
 
-/// Cached view of one session's subagents dir.
 pub struct Subagents {
     dir: PathBuf,
     dir_mtime_ms: Option<i64>,
     entries: BTreeMap<AgentId, Entry>,
-    /// Sidecar folds for Running agents only.
     open: BTreeMap<AgentId, Transcript>,
 }
 
 impl Subagents {
-    /// `<transcript dir>/<sid>/subagents`. The dir may not exist yet; that is an empty set.
     pub fn new(main_transcript: &Path) -> Subagents {
         let dir = main_transcript.with_extension("").join("subagents");
         Subagents { dir, dir_mtime_ms: None, entries: BTreeMap::new(), open: BTreeMap::new() }
     }
 
-    /// Re-list if the dir changed, re-parse changed metas, then reconcile cursors with
-    /// `agent_state`: open a sidecar cursor for every Running agent that lacks one (including one
-    /// re-opened by `resumedAgentId`), pump it, and drop cursors of agents in any other state.
-    /// `main` is the session's main-transcript facts; `alive` is registry liveness.
-    /// `budget` is the bytes this call may spend on first-sight windows; it returns what it
-    /// spent. Per-file failures are returned as diagnostics, never fatal.
     pub fn refresh(&mut self, main: &Facts, alive: bool, budget: u64) -> (u64, Vec<Problem>) {
         let mut problems = Vec::new();
         let dir_mtime = match FileStamp::of(&self.dir) {
@@ -108,9 +82,6 @@ impl Subagents {
             self.relist(&mut problems);
             self.dir_mtime_ms = Some(dir_mtime);
         }
-        // `stoppedByUser` is merged into the meta file later, in place, which leaves the dir
-        // mtime alone. Only a Running agent can still be stopped, so only those metas are
-        // re-stated.
         let running: Vec<AgentId> = self.open.keys().cloned().collect();
         for id in &running {
             self.reparse_if_moved(id, &mut problems);
@@ -149,15 +120,12 @@ impl Subagents {
         (spent, problems)
     }
 
-    /// Close the sidecar cursor but keep its facts, so the state rule keeps the tail it saw.
     fn drop_cursor(&mut self, id: &AgentId) {
         if let Some(t) = self.open.remove(id) {
             self.entries.get_mut(id).expect("every cursor has an entry").kept = Some(t.facts().clone());
         }
     }
 
-    /// Every known agent with its state and, while running, its sidecar facts (for the now-line).
-    /// Order: by id. Depth-2 agents are included; `AgentMeta::parent` places them in the tree.
     pub fn agents<'a>(
         &'a self,
         main: &'a Facts,
@@ -169,8 +137,6 @@ impl Subagents {
         })
     }
 
-    /// Re-read the directory (and `workflows/<runId>/`), parse new or changed metas, forget
-    /// agents whose files are gone.
     fn relist(&mut self, problems: &mut Vec<Problem>) {
         let mut seen: Vec<(AgentId, Option<String>, PathBuf)> = Vec::new();
         for (path, run) in meta_files(&self.dir) {
@@ -221,7 +187,6 @@ impl Subagents {
         }
     }
 
-    /// The sidecar facts for `id`: live while it has a cursor, else what was kept.
     fn facts_of(&self, id: &AgentId) -> Option<&Facts> {
         self.open
             .get(id)
@@ -235,8 +200,6 @@ impl Subagents {
             Some(pid) => {
                 let facts = self.facts_of(pid);
                 let state = match self.entries.get(pid) {
-                    // A parent that is itself nested is beyond the two levels the tree shows;
-                    // treat it as running rather than recurse without bound.
                     Some(p) if p.meta.parent.is_some() => NodeState::Running,
                     Some(p) => self.state_of(&p.meta, main, alive),
                     None => NodeState::Orphaned,
@@ -261,14 +224,12 @@ impl Subagents {
     }
 }
 
-/// `agent-<id>.meta.json` -> `<id>`.
 fn agent_id_of(path: &Path) -> Option<AgentId> {
     let name = path.file_name()?.to_str()?;
     let id = name.strip_prefix("agent-")?.strip_suffix(".meta.json")?;
     (!id.is_empty()).then(|| AgentId(id.to_owned()))
 }
 
-/// Every meta file in `dir` and one level under `dir/workflows/<runId>/`, with the run id.
 fn meta_files(dir: &Path) -> Vec<(PathBuf, Option<String>)> {
     fn metas_in(dir: &Path) -> Vec<PathBuf> {
         let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
@@ -287,20 +248,6 @@ fn meta_files(dir: &Path) -> Vec<(PathBuf, Option<String>)> {
     out
 }
 
-/// The agent-state rule (GROUNDING 3.9), in one pure function so tests pin it. First match wins:
-/// 1. `stopped_by_user` -> Killed (these get no notification, gotcha 24).
-/// 2. `relaunched` (the parent's fold has the agent in `open_bg`: a fresh launch, or re-opened
-///    by `resumedAgentId`) while the session is alive and the parent is running -> Running.
-///    Gated on liveness so a dead session's open launches fall through to Orphaned.
-/// 3. a notice with `Some(outcome)` and no sidecar activity after it -> Finished(outcome).
-/// 4. `sidecar_looks_finished` (the tail is end-of-turn text or a handback) ->
-///    Finished(AwaitingNotice).
-/// 5. parent agent not Running (depth 2) -> Orphaned: open children of a finished parent are
-///    likely dead.
-/// 6. session process dead -> Orphaned.
-/// 7. sidecar went quiet before the parent's horizon started and no notice is visible ->
-///    Finished(AwaitingNotice): its completion predates our window.
-/// 8. otherwise Running.
 #[allow(clippy::too_many_arguments)]
 pub fn agent_state(
     meta: &AgentMeta,
@@ -368,8 +315,6 @@ mod tests {
 
     #[test]
     fn parse_meta_reads_tree_fields_and_defaults() {
-        // Defect: a depth-2 agent placed at the root; a missing stoppedByUser read as stopped;
-        // an env-assignment prefix in the description reaching the screen.
         let m = parse_meta(
             AgentId("c1".into()),
             Some("wf_abc123".into()),
@@ -391,24 +336,17 @@ mod tests {
         let m = meta("a1", None, false);
         let killed = meta("a1", None, true);
         let cases: Vec<(&str, NodeState, NodeState)> = vec![
-            // Defect (gotcha 24): a user-stopped agent shown running because the parent still lists it.
             ("1 stoppedByUser beats everything", agent_state(&killed, true, None, Some(at(5)), false, None, horizon(0), true), NodeState::Killed),
-            // Defect (gotcha 22): a resumed agent shown finished because an older notice exists.
             ("2 relaunched after a notice", agent_state(&m, true, done(3), Some(at(2)), true, None, horizon(0), true), NodeState::Running),
-            // Defect: a dead session's open launch shown as Running.
             ("2 relaunched but session dead", agent_state(&m, true, None, Some(at(2)), false, None, horizon(0), false), NodeState::Orphaned),
             ("3 notice newer than the tail", agent_state(&m, false, done(5), Some(at(4)), true, None, horizon(0), true), NodeState::Finished(TaskOutcome::Completed)),
             ("3 notice with no sidecar info", agent_state(&m, false, done(5), None, false, None, horizon(0), true), NodeState::Finished(TaskOutcome::Completed)),
-            // Defect: a notice older than fresh activity treated as final.
             ("3 skipped when the tail is newer", agent_state(&m, false, done(5), Some(at(6)), false, None, horizon(0), true), NodeState::Running),
-            // Defect: a monitor-style event (no outcome) treated as a completion.
             ("3 needs an outcome", agent_state(&m, false, Some(Notice { at: at(5), outcome: None }), Some(at(4)), false, None, horizon(0), true), NodeState::Running),
             ("4 tail looks finished", agent_state(&m, false, None, Some(at(4)), true, None, horizon(0), true), NodeState::Finished(TaskOutcome::AwaitingNotice)),
-            // Defect: a zombie depth-2 child shown running under a finished parent.
             ("5 finished parent orphans an open child", agent_state(&m, true, None, Some(at(4)), false, Some(NodeState::Finished(TaskOutcome::Completed)), horizon(0), true), NodeState::Orphaned),
             ("5 but a notified child stays finished", agent_state(&m, false, done(5), Some(at(4)), false, Some(NodeState::Killed), horizon(0), true), NodeState::Finished(TaskOutcome::Completed)),
             ("6 dead session", agent_state(&m, false, None, Some(at(4)), false, None, horizon(0), false), NodeState::Orphaned),
-            // Defect: an ancient agent (quiet before our window) shown running forever.
             ("7 quiet before the window", agent_state(&m, false, None, Some(at(1)), false, None, horizon(9), true), NodeState::Finished(TaskOutcome::AwaitingNotice)),
             ("8 running", agent_state(&m, false, None, Some(at(10)), false, Some(NodeState::Running), horizon(9), true), NodeState::Running),
             ("8 running with no sidecar yet", agent_state(&m, false, None, None, false, None, horizon(9), true), NodeState::Running),
@@ -441,9 +379,6 @@ mod tests {
 
     #[test]
     fn refresh_tracks_running_agents_only() {
-        // Defects: cursors held for finished agents (cost); a Killed agent shown running; a
-        // depth-2 completion (in the parent agent's file) missed; a child of a finished parent
-        // shown running.
         let (main_path, main) = fixture_tree("tree");
         let mut s = Subagents::new(&main_path);
         let (spent, problems) = s.refresh(&main, true, 1 << 20);
@@ -473,12 +408,10 @@ mod tests {
 
     #[test]
     fn refresh_defers_cursors_when_the_budget_is_spent() {
-        // Defect: a cold start reading every sidecar at once regardless of the read budget.
         let (main_path, main) = fixture_tree("budget");
         let mut s = Subagents::new(&main_path);
         let (spent, problems) = s.refresh(&main, true, 0);
         assert_eq!(spent, 0);
-        // c1's completion lives in a1's sidecar, unseen until a1 opens, so it waits too.
         assert_eq!(problems.iter().filter(|p| **p == Problem::Deferred).count(), 3, "a1, c1 and c2 wait");
         let got = states(&s, &main, true);
         assert_eq!(got["a1"], (NodeState::Running, false));
@@ -489,8 +422,6 @@ mod tests {
 
     #[test]
     fn late_stopped_by_user_is_picked_up_without_a_relist() {
-        // Defect (gotcha 24): `stoppedByUser` merged into the meta in place (dir mtime
-        // unchanged) never read, so a stopped agent stays Running.
         let (main_path, main) = fixture_tree("stopped");
         let mut s = Subagents::new(&main_path);
         s.refresh(&main, true, 1 << 20);
@@ -507,10 +438,6 @@ mod tests {
 
     #[test]
     fn dead_session_orphans_open_agents_but_keeps_finished_ones() {
-        // Defect: every agent of an exited session shown as orphaned, including the ones whose
-        // completion the main file recorded; or open ones still shown running. Depth-2
-        // completions live in the parent's sidecar, which a dead session never opens, so its
-        // children are Orphaned whatever they did.
         let (main_path, main) = fixture_tree("dead");
         let mut s = Subagents::new(&main_path);
         let (spent, _) = s.refresh(&main, false, 1 << 20);

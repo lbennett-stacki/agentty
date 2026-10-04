@@ -1,12 +1,3 @@
-//! The observer: owns every cursor and cache, and turns "something may have changed" into an
-//! up-to-date set of parsed domain values. The only module that does filesystem IO on Claude
-//! files (via the parser modules) and the only one that runs `ps` and `tmux list-panes` (via
-//! `Host`). Single-threaded; owned by the main loop, so no locks.
-//!
-//! Change detection is stat-based and is the source of truth: `refresh` stats every tracked
-//! file and re-reads only those whose stamp moved. notify is only a doorbell that makes the
-//! next refresh happen sooner; a dropped or coalesced event costs latency, never correctness.
-
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -24,22 +15,16 @@ use crate::subagents::Subagents;
 use crate::transcript::{Transcript, Window};
 
 const EXITED_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
-/// A session with no transcript yet (none before the first prompt, gotcha 14) is re-globbed at
-/// most this often.
 const REGLOB_MS: i64 = 5_000;
 
-/// Filesystem roots. Injected so fixture tests point the whole observer at a fixture tree.
 #[derive(Clone, Debug)]
 pub struct Roots {
     pub home: PathBuf,
-    /// `$CLAUDE_CONFIG_DIR`, if set.
     pub env_config_dir: Option<PathBuf>,
-    /// `~/.cache/agentically` (statusline tee lands under `statusline/`).
     pub cache: PathBuf,
 }
 
 impl Roots {
-    /// `$HOME`, `$CLAUDE_CONFIG_DIR`, `~/.cache/agentically`.
     pub fn from_env() -> anyhow::Result<Roots> {
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
         let env_config_dir =
@@ -48,26 +33,15 @@ impl Roots {
     }
 }
 
-/// The impure edges other than file reads, narrowed to what fixture tests must fake. A
-/// `FakeHost` with a fixed clock, a pid table and a pane list makes `World::refresh` a pure
-/// function of the fixture tree.
 pub trait Host {
     fn now(&self) -> At;
-    /// One `ps` call for all candidate pids (`registry::ps_argv` + `registry::parse_ps`). A dead
-    /// pid is absent. `Err` means `ps` itself failed: `World` then keeps every candidate alive
-    /// and records `DiagSource::Ps / Problem::Unavailable`, so a transient failure never blanks
-    /// the list.
     fn proc_starts(&mut self, pids: &[Pid]) -> Result<HashMap<Pid, ProcStart>, HostError>;
-    /// One `tmux list-panes -a -F '#{pane_id}\t#{pane_pid}'` (`LIST_PANES_ARGV` + `parse_panes`).
-    /// `Err` (no server, not in tmux) yields no verified panes and a `Tmux` diagnostic.
     fn panes(&mut self) -> Result<Vec<PaneInfo>, HostError>;
 }
 
-/// A command failure, without its output (which could echo arguments).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostError;
 
-/// The real clock, `ps` and `tmux`.
 pub struct RealHost;
 
 impl Host for RealHost {
@@ -102,8 +76,6 @@ impl Host for RealHost {
 
 pub const LIST_PANES_ARGV: &[&str] = &["list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}"];
 
-/// Lenient parse of `list-panes` output; malformed lines are skipped. A pane's absence from this
-/// list is the only existence test (gotcha 31).
 pub fn parse_panes(stdout: &str) -> Vec<PaneInfo> {
     stdout
         .lines()
@@ -114,23 +86,12 @@ pub fn parse_panes(stdout: &str) -> Vec<PaneInfo> {
         .collect()
 }
 
-/// Why a refresh runs. Decides how much is re-stat'ed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wake {
-    /// notify saw a change under a watched dir (`sessions/`, `jobs/`, `tasks/`, statusline
-    /// cache). Re-stat registries, jobs, tasks and the statusline cache; run `ps` only for pids
-    /// not seen before. Transcripts are not touched.
     Doorbell,
-    /// The 1 s tick. Everything `Doorbell` does, plus `ps` for every pid, the tmux pane
-    /// snapshot, and a stat-poll of every tracked transcript and sidecar.
     Tick,
 }
 
-/// Bytes `refresh` may spend on first-sight transcript windows (the 256 KB -> 1 MB -> 4 MB
-/// retries and 64 KB sidecar tails). Files it cannot afford this refresh get a `Deferred`
-/// diagnostic and are opened on a later refresh, so a cold start with many large files never
-/// stalls one frame for long. Steady-state appends are not budgeted (they are small by
-/// construction).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadBudget {
     pub bytes_per_refresh: u64,
@@ -142,8 +103,6 @@ impl Default for ReadBudget {
     }
 }
 
-/// `(mtime ms, len)`: the change gate for small files that are re-read whole, where an inode
-/// change needs no special handling.
 type Stamp = (i64, u64);
 
 fn stamp(path: &Path) -> Option<Stamp> {
@@ -157,28 +116,16 @@ pub struct World {
     host: Box<dyn Host>,
     budget: ReadBudget,
     dirs: Vec<ConfigDir>,
-    /// Alive, non-hidden registry entries, in (dir, pid) order.
     live: Vec<Live>,
-    /// Jobs whose process is alive, including those held only by a hidden (spare or parked)
-    /// record. Every other job is an Exited candidate.
     live_jobs: HashSet<(ConfigDir, JobId)>,
     jobs: BTreeMap<(ConfigDir, JobId), (Stamp, Job)>,
-    /// One fold per transcript *file*; two live holders of one sessionId share it.
     transcripts: BTreeMap<PathBuf, Tracked>,
-    /// sessionId -> transcript path. Re-globbed when missing at most once per `REGLOB_MS`, and
-    /// whenever the sessionId changes (a new key) or the found file disappears (relocation).
     resolved: HashMap<(ConfigDir, SessionId), Resolution>,
-    /// Keyed by the stamps of the `N.json` files: task files are rewritten in place, so the
-    /// dir's own mtime does not move on a status change.
     tasks: HashMap<(ConfigDir, SessionId), (Vec<Stamp>, Vec<Task>)>,
     statusline: HashMap<SessionId, Statusline>,
-    /// `teams/<team>/config.json` path -> parsed team.
     teams: BTreeMap<PathBuf, (Stamp, Team)>,
-    /// cwd -> main repo root, for live cwds and exited worktrees.
     repos: HashMap<PathBuf, Option<PathBuf>>,
-    /// Latest `ps` answer for registry candidates, kept across `Doorbell` refreshes.
     proc_starts: HashMap<Pid, ProcStart>,
-    /// Latest tmux pane snapshot.
     panes: Vec<PaneInfo>,
     diagnostics: Vec<Diagnostic>,
 }
@@ -193,7 +140,6 @@ enum Resolution {
     Missing { checked: At },
 }
 
-/// A live session as observed: the registry entry plus where its transcript is.
 #[derive(Clone, Debug)]
 pub struct Live {
     pub dir: ConfigDir,
@@ -223,22 +169,8 @@ impl World {
         }
     }
 
-    /// Bring every cache up to date. Order matters and is fixed here:
-    /// 1. discover config dirs; scan registries; `ps` per `Wake` (degrade on failure: keep all
-    ///    candidates alive, add a diagnostic); split hidden entries off into `live_jobs`;
-    /// 2. stat + re-parse changed job state.json files (resolution needs `linkScanPath`);
-    /// 3. resolve transcripts: `linkScanPath` for bg, else a glob, re-run per `resolved`;
-    /// 4. on `Tick`: pump every referenced transcript within the read budget, then its subagents
-    ///    (which need the main facts); take the tmux pane snapshot;
-    /// 5. stat-gated reads of tasks, statusline cache, team configs; repo roots for new cwds.
-    ///
-    /// Every cache is rebuilt from what live sessions and exited jobs reference, so a dead row's
-    /// cursors and caches go with it. Never fails as a whole: per-file failures become
-    /// `Diagnostic`s, replaced each time their source is re-checked.
     pub fn refresh(&mut self, wake: Wake) {
         let tick = wake == Wake::Tick;
-        // A doorbell does not re-check transcripts, tmux or (for known pids) ps, so it keeps
-        // their diagnostics; everything else is re-derived below.
         self.diagnostics.retain(|d| {
             !tick
                 && matches!(
@@ -287,8 +219,6 @@ impl World {
             }
         }
 
-        // A doorbell asks `ps` only about records it cannot vouch for: a new pid, or a known pid
-        // whose record now names another process start (pid reuse).
         let mut ask: Vec<Pid> = candidates
             .iter()
             .filter(|(_, r)| tick || self.proc_starts.get(&r.pid) != Some(&r.proc_start))
@@ -338,7 +268,6 @@ impl World {
             for entry in listing.flatten() {
                 let Some(id) = entry.file_name().to_str().map(|n| JobId(n.to_owned())) else { continue };
                 let path = entry.path().join("state.json");
-                // Spares have a job dir but no state.json; `pins.json` is not a dir at all.
                 let Some(now_stamp) = stamp(&path) else { continue };
                 let key = (dir.clone(), id);
                 let previous = self.jobs.remove(&key);
@@ -355,8 +284,6 @@ impl World {
                     }
                     Err(problem) => {
                         self.diagnostics.push(diag(&self.roots.home, DiagSource::Job, problem, &path));
-                        // Keep the last good parse under its old stamp, so the next refresh
-                        // retries the read.
                         if let Some(prev) = previous {
                             next.insert(key, prev);
                         }
@@ -402,7 +329,6 @@ impl World {
         self.resolved.retain(|k, _| referenced.contains(k));
     }
 
-    /// bg jobs with no live process whose `ended_at` is within 24h of `now`.
     fn exited_jobs(&self, now: At) -> impl Iterator<Item = (&ConfigDir, &Job)> {
         self.jobs.iter().filter_map(move |(key, (_, job))| {
             let recent = job.ended_at.is_some_and(|e| now.millis_since(e) <= EXITED_WINDOW_MS);
@@ -411,7 +337,6 @@ impl World {
     }
 
     fn pump_transcripts(&mut self, now: At) {
-        // path -> whether any holder is alive (an exited job's agents are orphans).
         let mut refs: BTreeMap<PathBuf, bool> = BTreeMap::new();
         for p in self.live.iter().filter_map(|l| l.transcript.as_ref()) {
             refs.insert(p.clone(), true);
@@ -435,9 +360,6 @@ impl World {
                     e.into_mut()
                 }
                 Entry::Vacant(v) => {
-                    // Admitted while the budget is unspent, then charged what it actually read, so
-                    // one refresh opens many small-window files but never more than one budget's
-                    // worth of large ones past the first.
                     if spent >= budget {
                         self.diagnostics.push(diag(home, DiagSource::Transcript, Problem::Deferred, &path));
                         continue;
@@ -481,7 +403,6 @@ impl World {
                             .and_then(|b| sidecars::parse_task(&b));
                         match parsed {
                             Ok(t) => tasks.push(t),
-                            // Deleted between listing and reading: lists self-erase (gotcha 27).
                             Err(Problem::Unreadable) if !path.exists() => {}
                             Err(p) => self.diagnostics.push(diag(&self.roots.home, DiagSource::Tasks, p, path)),
                         }
@@ -560,7 +481,6 @@ impl World {
         }
     }
 
-    /// The host clock, so callers and `World` agree on `now` (fixtures set it).
     pub fn now(&self) -> At {
         self.host.now()
     }
@@ -593,7 +513,6 @@ impl World {
         }
     }
 
-    /// bg jobs without a live registry record whose `ended_at` is within 24h of `now`.
     pub fn exited(&self, now: At) -> Vec<ExitedView<'_>> {
         self.exited_jobs(now)
             .map(|(dir, job)| ExitedView {
@@ -604,12 +523,6 @@ impl World {
             .collect()
     }
 
-    /// Paths for the notify doorbell, each watched recursively: `<dir>/sessions`, `<dir>/jobs`,
-    /// `<dir>/tasks` per config dir, plus the statusline cache dir. Transcripts live under
-    /// `projects/`, which is deliberately not watched: an active session appends many lines per
-    /// second and would ring the bell continuously. They are stat-polled on `Wake::Tick`.
-    /// Only existing dirs are returned (a watch on a missing path fails); one that appears later
-    /// shows up after the next refresh, and the caller re-watches on change.
     pub fn watch_roots(&self) -> Vec<PathBuf> {
         self.dirs
             .iter()
@@ -632,8 +545,6 @@ fn diag(home: &Path, source: DiagSource, problem: Problem, path: &Path) -> Diagn
     Diagnostic { source, problem, path }
 }
 
-/// `<dir>/projects/*/<sid>.jsonl` (gotcha 13: never slug the cwd; worktree relocation moves the
-/// file). When forks left copies in two project dirs, the most recently written one wins.
 fn glob_transcript(dir: &ConfigDir, sid: &SessionId) -> Option<PathBuf> {
     let name = format!("{}.jsonl", sid.0);
     std::fs::read_dir(dir.0.join("projects"))
@@ -645,8 +556,6 @@ fn glob_transcript(dir: &ConfigDir, sid: &SessionId) -> Option<PathBuf> {
         .map(|(_, p)| p)
 }
 
-/// `^\d+\.json$` files of a task dir with their stamps, in task-number order. `.lock` and
-/// `.highwatermark` are not tasks.
 fn task_files(dir: &Path) -> Vec<(PathBuf, Stamp)> {
     let Ok(listing) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut files: Vec<(u32, PathBuf, Stamp)> = listing
@@ -727,8 +636,6 @@ pub(crate) mod tests {
             Fixture { home, host, world }
         }
 
-        /// A registry record whose process start is `start-<pid>`, the value `alive` registers.
-        /// `extra` fields override the defaults.
         fn session(&self, dir: &str, pid: u32, sid: &str, extra: serde_json::Value) {
             let mut record = serde_json::json!({
                 "pid": pid, "procStart": format!("start-{pid}"), "sessionId": sid,
@@ -759,8 +666,6 @@ pub(crate) mod tests {
 
     #[test]
     fn spare_and_parked_records_are_hidden_but_keep_their_jobs_live() {
-        // Defects (gotcha 10): a spare or a parked conversation rendered as a row, or the job a
-        // hidden record still holds shown under "finished".
         let f = Fixture::new("world-hidden");
         f.session(".claude", 10, "s-10", json!({}));
         f.session(".claude", 11, "s-11", json!({"kind": "bg", "jobId": "aaaa0001", "spare": true}));
@@ -778,8 +683,6 @@ pub(crate) mod tests {
 
     #[test]
     fn stale_record_and_reused_pid_are_dropped() {
-        // Defects (gotcha 9): a crashed session's leftover record shown as live, or a recycled
-        // pid running something else accepted because only the pid was checked.
         let mut f = Fixture::new("world-dead");
         f.session(".claude", 20, "s-20", json!({}));
         f.session(".claude", 21, "s-21", json!({}));
@@ -793,9 +696,6 @@ pub(crate) mod tests {
 
     #[test]
     fn session_id_change_keeps_the_row_and_re_resolves_the_transcript() {
-        // Defects: `/clear` under one process drops or duplicates its row, or the row keeps
-        // reading the old conversation's transcript. A doorbell must not re-run `ps` for a
-        // process it already verified.
         let mut f = Fixture::new("world-clear");
         f.session(".claude", 30, "old-sid", json!({}));
         f.alive(30);
@@ -814,8 +714,6 @@ pub(crate) mod tests {
 
     #[test]
     fn missing_transcript_is_reglobbed_after_the_backoff() {
-        // Defect (gotcha 14): a session whose transcript appears after its first prompt never
-        // gets one, or is globbed on every refresh.
         let mut f = Fixture::new("world-reglob");
         f.session(".claude", 31, "late", json!({}));
         f.alive(31);
@@ -832,7 +730,6 @@ pub(crate) mod tests {
 
     #[test]
     fn bg_transcript_comes_from_link_scan_path() {
-        // Defect: a bg row globbing by its current sessionId instead of the job's exact path.
         let mut f = Fixture::new("world-link");
         f.session(".claude", 32, "bg-sid", json!({"kind": "bg", "jobId": "cafe0001"}));
         f.alive(32);
@@ -847,7 +744,6 @@ pub(crate) mod tests {
 
     #[test]
     fn two_config_dirs_each_contribute_rows_and_watch_roots() {
-        // Defect (gotcha 1): only `~/.claude` scanned, so `~/.claude-personal` sessions vanish.
         let mut f = Fixture::new("world-dirs");
         f.session(".claude", 40, "a", json!({}));
         f.session(".claude-personal", 41, "b", json!({}));
@@ -866,15 +762,12 @@ pub(crate) mod tests {
 
     #[test]
     fn exited_jobs_are_shown_for_24h_after_their_process_retires() {
-        // Defects (SPEC 7): a finished job missing from "finished", a week-old one kept forever,
-        // or a running job listed as finished.
         let mut f = Fixture::new("world-exited");
         f.job(".claude", "c0000001", r#"{"state":"done","lastTerminalAt":"2026-10-04T11:00:00Z"}"#);
         f.job(".claude", "c0000002", r#"{"state":"done","lastTerminalAt":"2026-10-03T11:59:00Z"}"#);
         f.job(".claude", "c0000003", r#"{"state":"done","lastTerminalAt":"2026-10-04T11:30:00Z"}"#);
         f.session(".claude", 50, "s-50", json!({"kind": "bg", "jobId": "c0000003"}));
         f.alive(50);
-        // Crashed mid-flight: its record is stale, and it never wrote lastTerminalAt.
         f.job(".claude", "c0000004", r#"{"state":"working","updatedAt":"2026-10-04T10:00:00Z"}"#);
         f.session(".claude", 51, "s-51", json!({"kind": "bg", "jobId": "c0000004"}));
         f.home.write(".claude/jobs/pins.json", b"{}");
@@ -886,7 +779,6 @@ pub(crate) mod tests {
 
     #[test]
     fn ps_failure_keeps_every_candidate_and_reports_it() {
-        // Defect: a transient `ps` failure blanks the whole list.
         let mut f = Fixture::new("world-ps");
         f.session(".claude", 60, "s-60", json!({}));
         f.session(".claude", 61, "s-61", json!({}));
@@ -900,7 +792,6 @@ pub(crate) mod tests {
         let ps = Diagnostic { source: DiagSource::Ps, problem: Problem::Unavailable, path: "ps".into() };
         assert_eq!(f.world.diagnostics(), [ps.clone()]);
 
-        // A doorbell with no new pid runs no `ps`, so it keeps the warning instead of hiding it.
         f.home.remove(".claude/sessions/61.json");
         f.world.refresh(Wake::Doorbell);
         assert_eq!(f.pids(), [("".to_owned(), 60)]);
@@ -913,8 +804,6 @@ pub(crate) mod tests {
 
     #[test]
     fn tmux_snapshot_reaches_views_and_its_failure_is_reported() {
-        // Defects (gotcha 31): Enter offered for a pane that is gone because the snapshot was not
-        // refreshed, or a failed `list-panes` leaving yesterday's panes in place.
         let mut f = Fixture::new("world-tmux");
         f.session(".claude", 70, "s-70", json!({"tmux": "0:@1.%9"}));
         f.alive(70);
@@ -931,8 +820,6 @@ pub(crate) mod tests {
 
     #[test]
     fn sidecars_follow_their_files_and_leave_with_the_session() {
-        // Defects: a task status change missed because only the dir mtime was checked, tasks
-        // that self-erased still shown (gotcha 27), or caches of a dead session kept forever.
         let mut f = Fixture::new("world-sidecars");
         f.session(".claude", 80, "s-80", json!({}));
         f.alive(80);
@@ -968,7 +855,6 @@ pub(crate) mod tests {
 
     #[test]
     fn team_lead_and_repo_root_reach_the_view() {
-        // Defects: a team lead not grouped with its team, or a session's repo never resolved.
         let mut f = Fixture::new("world-team");
         let repo = f.home.path().join("src/demo");
         f.home.mkdir("src/demo/.git");
@@ -988,8 +874,6 @@ pub(crate) mod tests {
 
     #[test]
     fn unparsable_job_keeps_last_good_parse_and_is_reported() {
-        // Defect: a job state.json caught mid-rewrite drops the bg row's enrichment, or the
-        // failure is silent.
         let mut f = Fixture::new("world-badjob");
         f.session(".claude", 95, "s-95", json!({"kind": "bg", "jobId": "dead0001"}));
         f.alive(95);
@@ -1005,8 +889,6 @@ pub(crate) mod tests {
 
     #[test]
     fn read_budget_defers_first_sight_windows_to_later_ticks() {
-        // Defects: a cold start with many large transcripts reading them all in one frame, or a
-        // deferred transcript never opened.
         let mut f = Fixture::new("world-budget");
         let filler = "{\"type\":\"x\"}\n".repeat(5 << 20 >> 4);
         for (pid, sid) in [(100, "big-a"), (101, "big-b")] {
@@ -1025,7 +907,6 @@ pub(crate) mod tests {
         assert_eq!(opened(&f), 2);
         assert!(f.world.diagnostics().is_empty(), "{:?}", f.world.diagnostics());
 
-        // A doorbell never touches transcripts, and a dead session's fold is dropped.
         f.home.remove(".claude/sessions/100.json");
         f.world.refresh(Wake::Doorbell);
         assert_eq!(f.world.transcripts.len(), 2);
@@ -1033,8 +914,6 @@ pub(crate) mod tests {
         assert_eq!(f.world.transcripts.keys().collect::<Vec<_>>(), [&f.home.path().join(".claude/projects/-p/big-b.jsonl")]);
     }
 
-    /// Read-only run of discovery, registry, `ps` and job parsing over the real home. Prints row
-    /// shapes and problem counts only: no ids, paths or file content.
     #[test]
     #[ignore = "reads the real ~/.claude*; run with --ignored --nocapture"]
     fn real_data_probe() {
@@ -1072,7 +951,6 @@ pub(crate) mod tests {
 
     #[test]
     fn list_panes_output_parses_leniently() {
-        // Defect: one odd line (an iTerm id, a blank) drops every pane and every Enter target.
         let panes = parse_panes("%254\t5431\n%250\t85078\nbogus\n%x\t1\n\n");
         assert_eq!(panes.iter().map(|p| (p.id.as_str(), p.pid.0)).collect::<Vec<_>>(), [("%254", 5431), ("%250", 85078)]);
     }

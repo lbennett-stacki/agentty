@@ -1,9 +1,3 @@
-//! agentically: a read-only, tmux-native dashboard over every live Claude Code session.
-//!
-//! The thin shell. One thread owns all state (`World`, `Store`, `App`, `Snapshot`); two feeder
-//! threads only send `Msg`s: crossterm input, and the notify doorbell. A 1 s tick bounds
-//! staleness for liveness, transcript polling and time-in-status.
-
 mod derive;
 mod jobs;
 mod model;
@@ -32,10 +26,8 @@ use model::{
 };
 use world::{ReadBudget, RealHost, Roots, Wake, World};
 
-/// Everything the loop wakes up for.
 enum Msg {
     Term(Event),
-    /// A watched path changed. Payload deliberately ignored: refresh re-stats everything.
     Doorbell,
 }
 
@@ -48,13 +40,9 @@ struct Args {
 }
 
 const TICK: Duration = Duration::from_secs(1);
-/// Coalesce doorbells: at most one refresh per this interval.
 const MIN_REFRESH: Duration = Duration::from_millis(250);
-/// The read budget defers first-sight windows across ticks; `--dump` keeps refreshing until
-/// nothing is deferred so one frame shows every session fully read.
 const DUMP_MAX_REFRESHES: usize = 20;
 
-/// `--dump` width: the e2e scratch tmux session is 160 columns.
 const DUMP_WIDTH: u16 = 160;
 
 const USAGE: &str = "usage: agentically [--popup] [--state <path>] [--dump]
@@ -106,10 +94,6 @@ fn snapshot(world: &World) -> Snapshot {
     derive::snapshot(world.sessions(), world.exited(now).into_iter(), world.diagnostics(), now)
 }
 
-/// The loop: wait for a message or the next deadline; handle keys in order against the frame
-/// the user saw; refresh on the tick, or on a doorbell at most once per `MIN_REFRESH`; after a
-/// refresh, rebind anchors and commit the resulting ops (no-ops write nothing); re-watch when
-/// the set of existing watch roots changed; draw.
 fn run(
     terminal: &mut ratatui::DefaultTerminal,
     tx: mpsc::Sender<Msg>,
@@ -184,7 +168,6 @@ fn run(
             last_refresh = now;
             if wake == Wake::Tick {
                 let deferred = snap.diagnostics.iter().any(|d| d.problem == Problem::Deferred);
-                // Cold start reads windows a budget at a time; paint each batch, then continue at once.
                 next_tick = if deferred { now } else { now + TICK };
             }
         }
@@ -192,8 +175,6 @@ fn run(
     }
 }
 
-/// Run the reducer, then every effect it asks for, feeding each outcome back. Returns true when
-/// an effect was `Quit`.
 fn dispatch(
     app: &mut ui::App,
     snap: &Snapshot,
@@ -213,8 +194,6 @@ fn dispatch(
     false
 }
 
-/// Only roots that exist are watched, so a dir that appears later changes this set and gets
-/// watched on the next refresh.
 fn existing_watch_roots(world: &World, state_file: &Path) -> Vec<PathBuf> {
     world
         .watch_roots()
@@ -224,34 +203,22 @@ fn existing_watch_roots(world: &World, state_file: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// What to run inside a new tmux window. Ids are validated at parse (JobId 8 hex, SessionId a
-/// uuid), and tmux 3.4+ executes `shell-command argument ...` directly without `sh -c`, so no
-/// string is ever shell-quoted here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClaudeRun {
     Attach(JobId),
     New { session: SessionId, name: Option<String> },
 }
 
-/// Every tmux invocation, as data, so the exact command lines are unit-tested against `argv()`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TmuxCmd {
-    /// Existence check: `list-panes -t %N` exits 1 when the pane is gone (never `display -p`,
-    /// gotcha 31).
+    /// Existence check: `list-panes -t %N` exits 1 when the pane is gone; `display -p -t %N`
+    /// exits 0.
     ListPane(PaneId),
     SwitchClient(PaneId),
-    /// Always carries `-e CLAUDE_CONFIG_DIR=<dir>`: `tmux new-window` skips the user's zsh
-    /// `claude()` wrapper (gotcha 32).
     NewWindow { name: String, cwd: Option<PathBuf>, config_dir: ConfigDir, run: ClaudeRun },
 }
 
 impl TmuxCmd {
-    /// The argv after `tmux`:
-    /// - `ListPane(p)`      -> `["list-panes", "-t", p]`
-    /// - `SwitchClient(p)`  -> `["switch-client", "-t", p]`
-    /// - `NewWindow{..}`    -> `["new-window", "-n", name, ("-c", cwd)?, "-e",
-    ///   "CLAUDE_CONFIG_DIR=<dir>", "claude", "attach", job]` or
-    ///   `[..., "claude", "--session-id", sid, ("--name", name)?]`
     pub fn argv(&self) -> Vec<String> {
         match self {
             TmuxCmd::ListPane(p) => vec!["list-panes".into(), "-t".into(), p.as_str().into()],
@@ -283,13 +250,6 @@ impl TmuxCmd {
     }
 }
 
-/// Execute one effect. The only place that spawns tmux or claude. Returns `None` for `Quit`
-/// (the loop exits) and an `Outcome` otherwise.
-/// - `Jump(p)`        -> ListPane(p) (rc != 0 => Failed("pane gone")); SwitchClient(p) => Jumped
-/// - `Attach{..}`     -> NewWindow{run: Attach(job)} => Attached
-/// - `NewSession{..}` -> sid = mint_uuid_v4(); NewWindow{run: New{sid, name}} => Spawned{sid, group}
-/// - `Commit(op)`     -> store.commit(&op) => Committed
-/// - Outside tmux (`$TMUX` unset): Jump/Attach/NewSession => Failed("not inside tmux")
 fn execute(effect: Effect, store: &mut user_state::Store) -> Option<Outcome> {
     let failed = |what: &str| Outcome::Failed(what.to_owned());
     Some(match effect {
@@ -342,7 +302,6 @@ fn tmux(cmd: &TmuxCmd) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// A v4 uuid from /dev/urandom (no uuid crate). The only randomness in the app.
 fn mint_uuid_v4() -> std::io::Result<SessionId> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
@@ -357,7 +316,6 @@ fn format_uuid_v4(mut b: [u8; 16]) -> String {
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
-/// `--popup`, `--state <path>`, `--dump`, `--help`.
 fn parse_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<Args> {
     let mut out = Args::default();
     while let Some(arg) = args.next() {
@@ -375,7 +333,6 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<Args> {
     Ok(out)
 }
 
-/// A thread blocking on `event::read()`, forwarding each event as `Msg::Term`.
 fn spawn_input(tx: mpsc::Sender<Msg>) {
     std::thread::spawn(move || {
         while let Ok(ev) = event::read() {
@@ -386,8 +343,6 @@ fn spawn_input(tx: mpsc::Sender<Msg>) {
     });
 }
 
-/// One recursive watch per root (`World::watch_roots` plus the state file's dir); the callback
-/// only sends `Msg::Doorbell`. Returned so the loop can re-watch when the roots change.
 fn spawn_doorbell(
     tx: mpsc::Sender<Msg>,
     roots: Vec<PathBuf>,
@@ -415,16 +370,12 @@ mod tests {
         ConfigDir("/Users/u/.claude-personal".into())
     }
 
-    // Defect: jumping with the stale session/window part, or an existence check via
-    // `display -p` (which falls back to the current pane, gotcha 31).
     #[test]
     fn jump_commands_target_the_bare_pane_id() {
         assert_eq!(TmuxCmd::ListPane(pane()).argv(), ["list-panes", "-t", "%251"]);
         assert_eq!(TmuxCmd::SwitchClient(pane()).argv(), ["switch-client", "-t", "%251"]);
     }
 
-    // Defect: attach launched without CLAUDE_CONFIG_DIR (lands in the wrong config dir, gotcha
-    // 32), or a title with spaces split into several arguments.
     #[test]
     fn attach_window_passes_config_dir_and_keeps_the_title_whole() {
         let cmd = TmuxCmd::NewWindow {
@@ -448,8 +399,6 @@ mod tests {
         );
     }
 
-    // Defect: a typed name with spaces split across argv (claude would see stray positional
-    // prompt words), `--name` sent when none was typed, or the cwd dropped.
     #[test]
     fn new_session_window_runs_claude_with_session_id_and_optional_name() {
         let new = |name: Option<&str>| TmuxCmd::NewWindow {
@@ -495,8 +444,6 @@ mod tests {
         );
     }
 
-    // Defect: a uuid without the v4 version nibble or RFC 4122 variant bits, which
-    // `claude --session-id` may reject.
     #[test]
     fn uuid_v4_sets_version_and_variant_bits() {
         assert_eq!(format_uuid_v4([0xff; 16]), "ffffffff-ffff-4fff-bfff-ffffffffffff");
@@ -506,8 +453,6 @@ mod tests {
         assert_ne!(a, mint_uuid_v4().unwrap().0);
     }
 
-    // Defect: a flag silently ignored (e.g. `--popup` typo running the persistent mode), or
-    // `--state` swallowing the next flag.
     #[test]
     fn parse_args_accepts_known_flags_and_rejects_the_rest() {
         let parse = |a: &[&str]| parse_args(a.iter().map(|s| s.to_string()));

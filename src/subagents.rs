@@ -149,13 +149,10 @@ impl Subagents {
     }
 
     fn relist(&mut self, problems: &mut Vec<Problem>) {
-        let mut seen: Vec<(AgentId, Option<String>, PathBuf)> = Vec::new();
-        for (path, run) in meta_files(&self.dir) {
-            let Some(id) = agent_id_of(&path) else {
-                continue;
-            };
-            seen.push((id, run, path));
-        }
+        let seen: Vec<(AgentId, Option<String>, PathBuf)> = meta_files(&self.dir)
+            .into_iter()
+            .filter_map(|(path, run)| Some((agent_id_of(&path)?, run, path)))
+            .collect();
         let keep: Vec<&AgentId> = seen.iter().map(|(id, _, _)| id).collect();
         self.entries.retain(|id, _| keep.contains(&id));
         self.open.retain(|id, _| keep.contains(&id));
@@ -167,22 +164,19 @@ impl Subagents {
                 }
                 None => {
                     let mtime = FileStamp::of(&path).map_or(0, |s| s.mtime_ms);
-                    match std::fs::read(&path) {
-                        Ok(bytes) => match parse_meta(id.clone(), run, &bytes) {
-                            Ok(meta) => {
-                                self.entries.insert(
-                                    id,
-                                    Entry {
-                                        meta_path: path,
-                                        meta_mtime_ms: mtime,
-                                        meta,
-                                        kept: None,
-                                    },
-                                );
-                            }
-                            Err(p) => problems.push(p),
-                        },
-                        Err(_) => problems.push(Problem::Unreadable),
+                    match read_meta(&path, id.clone(), run) {
+                        Ok(meta) => {
+                            self.entries.insert(
+                                id,
+                                Entry {
+                                    meta_path: path,
+                                    meta_mtime_ms: mtime,
+                                    meta,
+                                    kept: None,
+                                },
+                            );
+                        }
+                        Err(p) => problems.push(p),
                     }
                 }
             }
@@ -202,12 +196,9 @@ impl Subagents {
             return;
         }
         e.meta_mtime_ms = stamp.mtime_ms;
-        match std::fs::read(&e.meta_path) {
-            Ok(bytes) => match parse_meta(id.clone(), e.meta.workflow_run.clone(), &bytes) {
-                Ok(meta) => e.meta = meta,
-                Err(p) => problems.push(p),
-            },
-            Err(_) => problems.push(Problem::Unreadable),
+        match read_meta(&e.meta_path, id.clone(), e.meta.workflow_run.clone()) {
+            Ok(meta) => e.meta = meta,
+            Err(p) => problems.push(p),
         }
     }
 
@@ -246,6 +237,11 @@ impl Subagents {
             alive,
         )
     }
+}
+
+fn read_meta(path: &Path, id: AgentId, workflow_run: Option<String>) -> Result<AgentMeta, Problem> {
+    let bytes = std::fs::read(path).map_err(|_| Problem::Unreadable)?;
+    parse_meta(id, workflow_run, &bytes)
 }
 
 fn agent_id_of(path: &Path) -> Option<AgentId> {

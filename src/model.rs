@@ -224,8 +224,8 @@ impl SafeText {
 fn is_env_assignment(word: &str) -> bool {
     match word.split_once('=') {
         Some((name, _)) => {
-            !name.is_empty()
-                && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         }
         None => false,
     }

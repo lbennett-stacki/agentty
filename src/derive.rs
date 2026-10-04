@@ -531,7 +531,11 @@ fn roster<'a>(v: &SessionView<'a>) -> Vec<RosterItem<'a>> {
                     FanKind::Workflow => Work::Workflow,
                     _ => return None,
                 };
-                Some(RosterItem { id: TaskId(f.id.clone()), kind, label: &f.label, since: f.started_at })
+                let id = TaskId(f.id.clone());
+                // A fan shell label is the command line (redacted to little more than the
+                // program name); the transcript's launch carries the tool's description.
+                let described = v.facts.and_then(|facts| facts.open_bg.get(&id)).map(|b| &b.label);
+                Some(RosterItem { label: described.unwrap_or(&f.label), id, kind, since: f.started_at })
             })
             .collect();
     }
@@ -1369,6 +1373,20 @@ mod tests {
         let live: Vec<(&str, NodeState)> = t.live.iter().map(|n| (n.id.0.as_str(), n.state)).collect();
         assert_eq!(live, [("a2", NodeState::Running), ("a9", NodeState::Running), ("b1", NodeState::Running)]);
         assert_eq!(t.finished, 1);
+    }
+
+    #[test]
+    fn bg_shell_leaves_use_the_launch_description_over_the_fan_command() {
+        // Defect: a bg row's shells shown as their bare program name ("until", "gh") when the
+        // transcript has the Bash description for the same task id.
+        let mut fx = Fx::new(bg_reg(RegStatus::Shell)).with_facts(|f| {
+            f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Shell, "Wait for CI on main"));
+        });
+        fx.job = Some(Job { fan: vec![fan("b1", FanKind::Shell, false), fan("b2", FanKind::Shell, false)], ..job() });
+        let t = tree(&fx.view(), &[], T0);
+        let labels: Vec<&str> = t.live.iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(labels[0], "Wait for CI on main");
+        assert_ne!(labels[1], "Wait for CI on main");
     }
 
     #[test]

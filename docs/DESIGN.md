@@ -121,7 +121,7 @@ Every parse failure is a typed `Diagnostic { source, problem, path }`, where `Pr
 - **`Wake` decides the depth of a refresh.** `Wake::Doorbell` re-stats registries, jobs, tasks and the statusline cache, and runs `ps` only for pids not seen before. `Wake::Tick` does everything: `ps` for every pid, the tmux pane snapshot, and a stat of every tracked transcript and sidecar. notify is a doorbell and `stat` is the truth, so a dropped or coalesced event costs latency, never correctness.
 - **`Host` isolates the impure edges.** `Host { now, proc_starts, panes }` is the only path to the clock, `ps` and `tmux list-panes`. A `FakeHost` makes `World::refresh` a pure function of a fixture tree. When `ps` fails, `World` keeps every candidate alive and records a `Ps / Unavailable` diagnostic. A transient failure never blanks the list.
 - **Transcript cursor.** `Transcript { offset, partial, facts }`. `pump()` reads `[offset, len)`, holds back a trailing partial line, and folds each complete line through the pure reducer `Facts::apply_line`. A changed inode or a shrunk length means the file was replaced, so the cursor reopens from a fresh window.
-- **Window on first sight (SPEC: tail only).** Tail 256 KB, then scan for a `"type":"last-prompt"` substring. That record starts every metadata block, and the max observed distance from EOF is 310 KB. If the scan misses, retry at 1 MB, then at 4 MB, and start the fold at the last block found. `Facts.horizon` records where knowledge starts. Derive turns that into `Count::AtLeast`, and `subagents::agent_state` uses it for "finished before our window".
+- **Window on first sight (SPEC: tail only).** Read a 256 KB tail and look for a `"type":"last-prompt"` substring. That record starts every metadata block, and the furthest one observed from EOF was 310 KB. If the tail has none, retry at 1 MB, then at 4 MB. The fold starts at the first complete line of the smallest tail that holds the block, not at the block itself: the block is re-appended between turns, so on 5 of 9 live transcripts it was the last thing in the file and a fold from it saw no conversation. `Facts.horizon` records where knowledge starts. Derive turns that into `Count::AtLeast`, and `subagents::agent_state` uses it for "finished before our window".
 - **A read budget bounds the frame.** `ReadBudget { bytes_per_refresh }` (default 4 MB) caps what first-sight windows may read in one refresh. A file that does not fit gets a `Deferred` diagnostic and opens on a later refresh. This keeps IO on the UI thread tolerable on a cold start with 20 large files. If measurement shows frame stalls anyway, moving `World` behind a channel is mechanical because the design shares nothing.
 - **Subagents.** The dir is re-listed only when its mtime moves. A sidecar cursor (64 KB tail) exists only for agents in state `Running`. Any other state drops the cursor. A session with 100 historical agents costs one `stat` per refresh.
 - **Cost at 20 sessions.** A steady tick is about 20 transcript stats, a few sidecar stats, ~20 small registry reads, ~30 `state.json` and task-dir stats, one `ps` and one `tmux list-panes`. Derive is microseconds, so there is no incremental derive and no derived cache to invalidate.
@@ -266,7 +266,6 @@ These run on the dev machine, read-only, in a scratch tmux session so nothing th
 
 ## Open questions and risks
 
-- Does `claude --session-id <uuid> --name <name>` work for interactive launches on 2.1.289? The flags are in `claude --help`, but an interactive run from a tmux window has not been exercised here.
 - Can two terminals `claude attach` the same job at once (GROUNDING open question 4)? If not, `Attach` needs an "already attached" check, and nothing on disk shows that state.
 - Should user-state entries for sessions unseen for 30 days be garbage-collected? Today the file only grows, by roughly 150 bytes per labelled session (the anchor table adds about 50).
 - Under a busy registry with no transcript (an unprompted bg job, a moved file), Working vs Parked cannot be decided. This design shows Working.
@@ -274,4 +273,12 @@ These run on the dev machine, read-only, in a scratch tmux session so nothing th
 
 ## Implementation reconciliation
 
-Empty until implementation starts.
+Accepted by the lead at merge:
+
+- `agent_state` rule order: rule 2 (relaunched) applies only while the session is alive and the parent agent runs, and the Orphaned checks (5, 6) come after rules 3 and 4. In the literal 1-to-8 order, a dead session's open launch read as Running and a child that completed before its parent finished read as Orphaned. The rule table test pins each ordering case.
+- The tree collapses every agent that is not Running (Finished, Killed, Orphaned) into the finished count of its level. A cold start on a pstack session otherwise listed every grandchild of a finished agent as a live Orphaned node.
+- `ExitedView` lost its `repo` field. Exited rows always group under Finished, so nothing read it.
+- `World` admits a first-sight transcript window while the refresh's budget is unspent and charges what `Transcript::window_bytes` reports, instead of charging 4 MB up front. A cold start of 8 sessions went from about 8 refreshes to 2. While anything is deferred, the main loop refreshes again at once instead of waiting for the 1 s tick.
+- For bg rows, a fan shell leaf shows the transcript's Bash `description` for the same task id when the fold has one. The fan label is the command line, which redaction cuts to little more than the program name.
+- `--dump` refreshes until nothing is deferred (at most 20 times), then prints the frame followed by one line per diagnostic.
+- `claude --session-id <uuid> --name <name>` works for interactive launches on 2.1.289. W4 ran it in a private tmux server, and the end-to-end check confirmed the argv, cwd, and `CLAUDE_CONFIG_DIR`.

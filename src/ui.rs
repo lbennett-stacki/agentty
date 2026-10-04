@@ -884,35 +884,35 @@ fn render_detail(frame: &mut Frame, area: Rect, row: &Row, user: &UserState, bor
         row.title.as_str().to_owned(),
         Style::new().add_modifier(Modifier::BOLD),
     ))];
-    let mut field = |name: &str, value: String| {
+    let mut section = |name: &str, lines: Vec<String>| {
         text.push(TLine::raw(""));
         text.push(TLine::from(Span::styled(name.to_owned(), dim())));
-        text.push(TLine::raw(value));
+        text.extend(lines.into_iter().map(TLine::raw));
     };
     if let Some(l) = user.entry(&row.user_key).and_then(|e| e.label.clone()) {
-        field("label", l);
+        section("label", vec![l]);
     }
     if let Some(p) = &d.last_prompt {
-        field("last prompt", p.as_str().to_owned());
+        section("last prompt", vec![p.as_str().to_owned()]);
     }
     if let Some(t) = &d.last_text {
-        field("last reply", t.as_str().to_owned());
+        section("last reply", vec![t.as_str().to_owned()]);
     }
     for (name, items) in [("open tasks", &d.open_tasks), ("pending", &d.pending)] {
         if !items.is_empty() {
-            field(name, items.iter().map(|s| format!("· {}", s.as_str())).collect::<Vec<_>>().join("\n"));
+            section(name, items.iter().map(|s| format!("· {}", s.as_str())).collect());
         }
     }
     for (name, path) in [("cwd", &d.cwd), ("config dir", &d.config_dir)] {
         if !path.as_os_str().is_empty() {
-            field(name, path.display().to_string());
+            section(name, vec![path.display().to_string()]);
         }
     }
     if let Some(s) = &d.session_id {
-        field("session", s.0.clone());
+        section("session", vec![s.0.clone()]);
     }
     if let Some(j) = &d.job_id {
-        field("job", j.0.clone());
+        section("job", vec![j.0.clone()]);
     }
     let block = Block::new().borders(border).border_style(dim()).padding(ratatui::widgets::Padding::horizontal(1));
     frame.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: true }), area);

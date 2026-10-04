@@ -225,6 +225,7 @@ impl TmuxCmd {
             TmuxCmd::SwitchClient(p) => {
                 vec!["switch-client".into(), "-t".into(), p.as_str().into()]
             }
+            // tmux execs a multi-argument command without `sh -c`, so no element needs quoting.
             TmuxCmd::NewWindow { name, cwd, config_dir, run } => {
                 let mut v = vec!["new-window".into(), "-n".into(), name.clone()];
                 if let Some(cwd) = cwd {

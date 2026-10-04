@@ -266,7 +266,7 @@ impl World {
         for dir in &self.dirs {
             let Ok(listing) = std::fs::read_dir(jobs::jobs_dir(dir)) else { continue };
             for entry in listing.flatten() {
-                let Some(id) = entry.file_name().to_str().map(|n| JobId(n.to_owned())) else { continue };
+                let Some(id) = entry.file_name().to_str().and_then(JobId::parse) else { continue };
                 let path = entry.path().join("state.json");
                 let Some(now_stamp) = stamp(&path) else { continue };
                 let key = (dir.clone(), id);

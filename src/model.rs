@@ -50,6 +50,14 @@ pub struct SessionId(pub String);
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JobId(pub String);
 
+impl JobId {
+    // The id becomes a `claude attach <job>` argument, so anything that could read as a flag
+    // or a path is rejected where it enters.
+    pub fn parse(raw: &str) -> Option<JobId> {
+        (!raw.is_empty() && raw.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| JobId(raw.to_owned()))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TaskId(pub String);
 
@@ -106,7 +114,7 @@ impl UserKey {
     }
     pub fn decode(s: &str) -> Option<UserKey> {
         if let Some(j) = s.strip_prefix("job:") {
-            return Some(UserKey::Job(JobId(j.to_owned())));
+            return JobId::parse(j).map(UserKey::Job);
         }
         s.strip_prefix("sid:").map(|sid| UserKey::Session(SessionId(sid.to_owned())))
     }
@@ -146,8 +154,8 @@ impl SafeText {
         }
         SafeText(out)
     }
-    pub fn ours(s: impl Into<String>) -> SafeText {
-        SafeText(s.into())
+    pub fn ours(s: &'static str) -> SafeText {
+        SafeText(s.to_owned())
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -555,6 +563,14 @@ mod tests {
     fn config_dir_short_tags_only_non_default_dirs() {
         assert_eq!(ConfigDir(PathBuf::from("/Users/x/.claude")).short(), "");
         assert_eq!(ConfigDir(PathBuf::from("/Users/x/.claude-personal")).short(), "personal");
+    }
+
+    #[test]
+    fn job_ids_that_could_read_as_flags_or_paths_are_rejected() {
+        assert_eq!(JobId::parse("9b3323e1"), Some(JobId("9b3323e1".into())));
+        for bad in ["--help", "../x", "", "a b"] {
+            assert_eq!(JobId::parse(bad), None, "{bad}");
+        }
     }
 
     #[test]

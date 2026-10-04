@@ -295,7 +295,7 @@ pub fn now_line(status: &Status, v: &SessionView<'_>, now: At) -> SafeText {
         Status::NeedsYou(Need::Waiting(w)) => SafeText::redact(w.label()),
         Status::NeedsYou(Need::JobQuestion(q)) => q.clone(),
         Status::Working => fresh_detail.or_else(|| v.facts.and_then(doing)).unwrap_or_else(empty),
-        Status::Parked(p) => SafeText::ours(format!("waiting on {}", describe_parked(p))),
+        Status::Parked(p) => SafeText::redact(&format!("waiting on {}", describe_parked(p))),
         Status::Idle { .. } => fresh_detail
             .or_else(|| {
                 let f = v.facts?;
@@ -353,7 +353,7 @@ pub fn tree(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> Tree {
             id: TaskId("wakeup".to_owned()),
             kind: NodeKind::Wakeup,
             state: NodeState::Running,
-            label: SafeText::ours(format!("wakes {}", clock(at))),
+            label: SafeText::redact(&format!("wakes {}", clock(at))),
             since: v.facts.and_then(|f| f.last_activity).unwrap_or(v.reg.status_since),
             now: None,
             children: Tree::default(),
@@ -361,6 +361,9 @@ pub fn tree(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> Tree {
     }
     t
 }
+
+// Real trees are at most two agents deep. The bound also stops a malformed self-parent cycle.
+const MAX_TREE_DEPTH: u8 = 2;
 
 fn agent_level(
     v: &SessionView<'_>,
@@ -370,7 +373,7 @@ fn agent_level(
     depth: u8,
 ) -> Tree {
     let mut t = Tree::default();
-    if depth > 2 {
+    if depth > MAX_TREE_DEPTH {
         return t;
     }
     for &(meta, state, sidecar) in agents {
@@ -531,7 +534,7 @@ pub fn detail(v: &SessionView<'_>, now: At) -> Detail {
         })
         .collect();
     if let Some(at) = future_wakeup(facts, now) {
-        pending.push(SafeText::ours(format!("wakeup · {}", clock(at))));
+        pending.push(SafeText::redact(&format!("wakeup · {}", clock(at))));
     }
     Detail {
         last_prompt: facts.and_then(|f| f.last_prompt.clone()),
@@ -686,7 +689,7 @@ mod tests {
         FanItem {
             id: id.into(),
             kind,
-            label: SafeText::ours(format!("fan {id}")),
+            label: SafeText::redact(&format!("fan {id}")),
             started_at: Some(at(-60)),
             done_at: done.then_some(at(-5)),
             failed: false,
@@ -694,22 +697,22 @@ mod tests {
     }
 
     fn bg(kind: BgKind, label: &str) -> BgItem {
-        BgItem { kind, label: SafeText::ours(label), started: at(-30), tool_use: None }
+        BgItem { kind, label: SafeText::redact(label), started: at(-30), tool_use: None }
     }
 
     fn tool(name: &str, summary: &str, answered: bool, t: At) -> ToolCall {
-        ToolCall { id: ToolUseId("toolu_1".into()), name: name.into(), summary: SafeText::ours(summary), at: t, answered }
+        ToolCall { id: ToolUseId("toolu_1".into()), name: name.into(), summary: SafeText::redact(summary), at: t, answered }
     }
 
     fn text(s: &str, t: At) -> TextBlock {
-        TextBlock { first_line: SafeText::ours(s), at: t, is_question: s.ends_with('?') }
+        TextBlock { first_line: SafeText::redact(s), at: t, is_question: s.ends_with('?') }
     }
 
     fn agent_meta(id: &str, parent: Option<&str>) -> AgentMeta {
         AgentMeta {
             id: AgentId(id.into()),
             agent_type: "Explore".into(),
-            description: SafeText::ours(format!("agent {id}")),
+            description: SafeText::redact(&format!("agent {id}")),
             tool_use: None,
             parent: parent.map(|p| AgentId(p.into())),
             model: Some("sonnet".into()),

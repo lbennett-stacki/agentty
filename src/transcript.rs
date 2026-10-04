@@ -76,6 +76,8 @@ impl Transcript {
         self.stamp.len.min(self.window.max_bytes())
     }
 
+    // Transcripts are append-only (inode and prefix hash stable while growing, 2.1.289), so a
+    // same-inode file at least as long as `offset` only gained lines.
     pub fn pump(&mut self) -> std::io::Result<bool> {
         let stamp = FileStamp::of(&self.path)?;
         if stamp.ino != self.stamp.ino || stamp.len < self.offset {

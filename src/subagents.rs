@@ -171,6 +171,8 @@ impl Subagents {
         }
     }
 
+    // Claude Code merges `stoppedByUser` into an existing meta file in place, which does not
+    // move the directory mtime that gates re-listing.
     fn reparse_if_moved(&mut self, id: &AgentId, problems: &mut Vec<Problem>) {
         let Some(e) = self.entries.get_mut(id) else { return };
         let Ok(stamp) = FileStamp::of(&e.meta_path) else { return };

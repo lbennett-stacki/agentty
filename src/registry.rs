@@ -112,7 +112,7 @@ pub fn parse(bytes: &[u8]) -> Result<RegEntry, Problem> {
         pane: w.tmux.as_deref().and_then(PaneId::parse),
         remote_control: nonempty(w.bridge_session_id).is_some(),
         hidden: w.spare == Some(true) || parked_job.is_some(),
-        job: nonempty(w.job_id).or(parked_job).map(JobId),
+        job: nonempty(w.job_id).or(parked_job).as_deref().and_then(JobId::parse),
     })
 }
 
@@ -159,6 +159,8 @@ fn is_registry_name(path: &Path) -> bool {
         .is_some_and(|stem| !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_digit()))
 }
 
+// Claude Code rewrites the registry file in place without a rename (2.1.289), so a read can
+// land on a half-written file.
 fn parse_with_retry(
     mut read: impl FnMut() -> std::io::Result<Vec<u8>>,
 ) -> Result<RegEntry, Option<Problem>> {

@@ -6,10 +6,10 @@
 //! complete lines and folds each into `Facts` via `Facts::apply_line`, a pure reducer. Wire
 //! structs and the intermediate `Event` enum are private to this file; callers only see `Facts`.
 //!
-//! Window policy (SPEC: tail-read, never full scans): on first open, start at the latest
-//! metadata block (`last-prompt` record) found within a bounded tail, so every "latest wins"
-//! metadata field is present from the first frame. Anything older than the window start is
-//! outside the `Horizon`, and `Facts` says so instead of guessing.
+//! Window policy (SPEC: tail-read, never full scans): on first open, fold the smallest bounded
+//! tail that holds a metadata block (`last-prompt` record), so every "latest wins" metadata
+//! field and the recent conversation are present from the first frame. Anything older than the
+//! window start is outside the `Horizon`, and `Facts` says so instead of guessing.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;

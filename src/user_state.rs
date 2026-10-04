@@ -291,6 +291,7 @@ fn encode(state: &UserState) -> String {
 mod tests {
     use super::*;
     use crate::model::JobId;
+    use crate::registry::tests::Scratch;
 
     fn sid(s: &str) -> SessionId {
         SessionId(s.into())
@@ -315,25 +316,8 @@ mod tests {
         }
     }
 
-    struct Scratch(PathBuf);
-    impl Scratch {
-        fn new(name: &str) -> Scratch {
-            let p = std::env::temp_dir().join(format!(
-                "agentically-us-{}-{name}-{}",
-                std::process::id(),
-                At::now().0
-            ));
-            fs::create_dir_all(&p).unwrap();
-            Scratch(p)
-        }
-        fn state(&self) -> PathBuf {
-            self.0.join("cfg/state.toml")
-        }
-    }
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
+    fn state_file(dir: &Scratch) -> PathBuf {
+        dir.path().join("cfg/state.toml")
     }
 
     #[test]
@@ -525,9 +509,9 @@ mod tests {
 
     #[test]
     fn two_stores_on_one_path_keep_each_others_commits() {
-        let dir = Scratch::new("interleave");
-        let mut a = Store::load(dir.state()).unwrap();
-        let mut b = Store::load(dir.state()).unwrap();
+        let dir = Scratch::new("user-state-interleave");
+        let mut a = Store::load(state_file(&dir)).unwrap();
+        let mut b = Store::load(state_file(&dir)).unwrap();
         a.commit(&label(skey("1"), "one")).unwrap();
         b.commit(&label(skey("2"), "two")).unwrap();
         a.commit(&Op::SetGroup {
@@ -535,7 +519,7 @@ mod tests {
             group: Some(group("g")),
         })
         .unwrap();
-        let fresh = Store::load(dir.state()).unwrap();
+        let fresh = Store::load(state_file(&dir)).unwrap();
         let labels: Vec<_> = fresh
             .state()
             .entries
@@ -549,24 +533,24 @@ mod tests {
 
     #[test]
     fn a_no_op_commit_does_not_touch_the_file() {
-        let dir = Scratch::new("noop");
-        let mut s = Store::load(dir.state()).unwrap();
+        let dir = Scratch::new("user-state-noop");
+        let mut s = Store::load(state_file(&dir)).unwrap();
         s.commit(&label(skey("1"), "one")).unwrap();
-        let before = stamp_of(&dir.state()).unwrap();
+        let before = stamp_of(&state_file(&dir)).unwrap();
         s.commit(&label(skey("1"), "one")).unwrap();
-        assert_eq!(stamp_of(&dir.state()).unwrap(), before);
+        assert_eq!(stamp_of(&state_file(&dir)).unwrap(), before);
         assert!(!s.reload_if_changed().unwrap());
     }
 
     #[test]
     fn a_corrupt_file_is_moved_aside_and_the_store_starts_empty() {
-        let dir = Scratch::new("corrupt");
-        let cfg = dir.state().parent().unwrap().to_owned();
+        let dir = Scratch::new("user-state-corrupt");
+        let cfg = state_file(&dir).parent().unwrap().to_owned();
         fs::create_dir_all(&cfg).unwrap();
-        fs::write(dir.state(), "this is = = not toml").unwrap();
-        let s = Store::load(dir.state()).unwrap();
+        fs::write(state_file(&dir), "this is = = not toml").unwrap();
+        let s = Store::load(state_file(&dir)).unwrap();
         assert_eq!(s.state(), &UserState::default());
-        assert!(!dir.state().exists());
+        assert!(!state_file(&dir).exists());
         let aside: Vec<_> = fs::read_dir(&cfg)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -581,10 +565,13 @@ mod tests {
 
     #[test]
     fn a_newer_file_refuses_to_load_and_is_left_in_place() {
-        let dir = Scratch::new("newer");
-        fs::create_dir_all(dir.state().parent().unwrap()).unwrap();
-        fs::write(dir.state(), "version = 2\n").unwrap();
-        assert!(Store::load(dir.state()).is_err());
-        assert_eq!(fs::read_to_string(dir.state()).unwrap(), "version = 2\n");
+        let dir = Scratch::new("user-state-newer");
+        fs::create_dir_all(state_file(&dir).parent().unwrap()).unwrap();
+        fs::write(state_file(&dir), "version = 2\n").unwrap();
+        assert!(Store::load(state_file(&dir)).is_err());
+        assert_eq!(
+            fs::read_to_string(state_file(&dir)).unwrap(),
+            "version = 2\n"
+        );
     }
 }

@@ -336,31 +336,27 @@ impl World {
         let mut referenced = HashSet::new();
         for i in 0..self.live.len() {
             let Live { dir, reg, .. } = &self.live[i];
-            let path = match self.job(dir, reg).and_then(|j| j.transcript.clone()) {
-                Some(p) => Some(p),
-                None => {
-                    let key = (dir.clone(), reg.session_id.clone());
-                    let path = match self.resolved.get(&key) {
-                        Some(Resolution::Found(p)) if p.is_file() => Some(p.clone()),
-                        Some(Resolution::Missing { checked })
-                            if now.millis_since(*checked) < REGLOB_MS =>
-                        {
-                            None
-                        }
-                        _ => {
-                            let found = glob_transcript(dir, &reg.session_id);
-                            let r = match &found {
-                                Some(p) => Resolution::Found(p.clone()),
-                                None => Resolution::Missing { checked: now },
-                            };
-                            self.resolved.insert(key.clone(), r);
-                            found
-                        }
+            if let Some(p) = self.job(dir, reg).and_then(|j| j.transcript.clone()) {
+                self.live[i].transcript = Some(p);
+                continue;
+            }
+            let key = (dir.clone(), reg.session_id.clone());
+            let path = match self.resolved.get(&key) {
+                Some(Resolution::Found(p)) if p.is_file() => Some(p.clone()),
+                Some(Resolution::Missing { checked }) if now.millis_since(*checked) < REGLOB_MS => {
+                    None
+                }
+                _ => {
+                    let found = glob_transcript(dir, &reg.session_id);
+                    let r = match &found {
+                        Some(p) => Resolution::Found(p.clone()),
+                        None => Resolution::Missing { checked: now },
                     };
-                    referenced.insert(key);
-                    path
+                    self.resolved.insert(key.clone(), r);
+                    found
                 }
             };
+            referenced.insert(key);
             self.live[i].transcript = path;
         }
         self.resolved.retain(|k, _| referenced.contains(k));

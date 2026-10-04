@@ -1,0 +1,33 @@
+{
+  "sessionId": "c0ffee00-1111-4222-8333-444444444444",
+  "state": "working",
+  "tempo": "active",
+  "detail": "Fee logic done; client side next",
+  "needs": null,
+  "inFlight": null,
+  "providerEnv": {"ANTHROPIC_API_KEY": "SECRET_SENTINEL_x9", "OTHER_TOKEN": "SECRET_SENTINEL_x9"},
+  "fan": [
+    {"id": "a1", "kind": "agent", "label": "Audit README links", "startedAt": 1791150000000},
+    {"id": "b1", "kind": "shell", "label": "API_KEY=SECRET_SENTINEL_x9 npm test -- --token SECRET_SENTINEL_x9", "startedAt": 1791150001000},
+    {"id": "b2", "kind": "monitor", "label": "Watch CI for the PR", "startedAt": 1791150002000, "doneAt": 1791150009000, "failed": true},
+    {"id": "todo:1", "kind": "todo", "label": "Write tests", "startedAt": 1791150003000},
+    {"id": "todo:2", "kind": "todo", "label": "Ship"},
+    {"id": "x1", "kind": "cron", "label": "Nightly", "startedAt": 1791150004000}
+  ],
+  "linkScanPath": "/home/user/.claude/projects/-work-demo/c0ffee00-1111-4222-8333-444444444444.jsonl",
+  "worktreePath": "/work/demo/.claude/worktrees/fees",
+  "worktreeBranch": "fees",
+  "name": "fees",
+  "bridgeSessionId": "",
+  "children": [
+    {"id": "1346", "kind": "pr", "href": "https://example.invalid/acme/demo/pull/1346"},
+    {"kind": "pr", "href": "https://example.invalid/acme/demo/pull/1347#issuecomment-1"},
+    {"id": "1346", "kind": "pr", "href": "https://example.invalid/acme/demo/pull/1346"},
+    {"id": "f1", "kind": "frame", "href": "https://example.invalid/frame/1"}
+  ],
+  "tokens": 141053,
+  "createdAt": "2026-10-04T09:00:00.000Z",
+  "updatedAt": "2026-10-04T10:15:30.500Z",
+  "firstTerminalAt": null,
+  "lastTerminalAt": null
+}

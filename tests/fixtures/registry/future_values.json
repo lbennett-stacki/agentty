@@ -1,0 +1,1 @@
+{"pid":9100,"sessionId":"99999999-0000-4000-8000-000000000009","cwd":"/work/demo-repo","procStart":"Mon Oct  5 01:02:03 2026","kind":"daemon-worker","entrypoint":"claude-desktop","status":"napping","updatedAt":1791150200000,"name":"fixer","nameSource":"peer","bridgeSessionId":"cse_0000example","someFutureField":{"nested":[1,2,3]}}

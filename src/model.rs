@@ -31,6 +31,10 @@ impl ConfigDir {
     }
 }
 
+pub fn nonempty(s: Option<String>) -> Option<String> {
+    s.filter(|s| !s.is_empty())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pid(pub u32);
 

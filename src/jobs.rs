@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::model::{At, ConfigDir, JobId, Problem, SafeText, SessionId};
+use crate::model::{At, ConfigDir, JobId, Problem, SafeText, SessionId, nonempty};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Job {
@@ -151,10 +151,6 @@ pub fn parse(id: JobId, bytes: &[u8]) -> Result<Job, Problem> {
             .and_then(At::parse_iso)
             .or(updated_at),
     })
-}
-
-fn nonempty(s: Option<String>) -> Option<String> {
-    s.filter(|s| !s.is_empty())
 }
 
 fn question(needs: &serde_json::Value) -> Option<&str> {

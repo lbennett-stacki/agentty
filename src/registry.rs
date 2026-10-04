@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::model::{At, ConfigDir, JobId, PaneId, Pid, Problem, ProcStart, SessionId, WaitingFor};
+use crate::model::{
+    At, ConfigDir, JobId, PaneId, Pid, Problem, ProcStart, SessionId, WaitingFor, nonempty,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegEntry {
@@ -134,10 +136,6 @@ fn waiting_for(raw: Option<&str>) -> WaitingFor {
         Some("goal proposal") => WaitingFor::GoalProposal,
         Some(other) => WaitingFor::Other(other.to_owned()),
     }
-}
-
-fn nonempty(s: Option<String>) -> Option<String> {
-    s.filter(|s| !s.is_empty())
 }
 
 pub fn scan(dir: &ConfigDir) -> (Vec<RegEntry>, Vec<(PathBuf, Problem)>) {

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::model::{At, ConfigDir, PaneId, Problem, SafeText, SessionId};
+use crate::model::{At, ConfigDir, PaneId, Problem, SafeText, SessionId, nonempty};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Task {
@@ -133,11 +133,8 @@ struct WireMember {
 pub fn parse_team(bytes: &[u8]) -> Result<Team, Problem> {
     let w: WireTeam = serde_json::from_slice(bytes).map_err(|_| Problem::Unparsable)?;
     Ok(Team {
-        name: w
-            .name
-            .filter(|n| !n.is_empty())
-            .ok_or(Problem::MissingField("name"))?,
-        lead: w.lead_session_id.filter(|s| !s.is_empty()).map(SessionId),
+        name: nonempty(w.name).ok_or(Problem::MissingField("name"))?,
+        lead: nonempty(w.lead_session_id).map(SessionId),
         members: w
             .members
             .into_iter()

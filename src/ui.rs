@@ -1423,8 +1423,10 @@ mod tests {
     fn move_mode_picks_creates_and_returns_to_automatic() {
         let r = row("t", 1, Status::Working, 0, repo("r"));
         let k = r.user_key.clone();
-        let mut user = UserState::default();
-        user.groups = vec![GroupName("jnj-web".into()), GroupName("side".into())];
+        let user = UserState {
+            groups: vec![GroupName("jnj-web".into()), GroupName("side".into())],
+            ..UserState::default()
+        };
         let s = snap(vec![r]);
         let mut app = App::new(false);
         let set = |g: Option<&str>| {
@@ -1505,6 +1507,8 @@ mod tests {
         assert!(!app.detail);
     }
 
+    // Defect: an off-by-one at a unit boundary ("60s", "60m") or a negative age when the
+    // clock is behind a file timestamp.
     #[test]
     fn elapsed_formats_each_unit_boundary() {
         let at = |s: i64| elapsed(At(NOW.0 - s * 1000), NOW);

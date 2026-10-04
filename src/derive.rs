@@ -265,19 +265,14 @@ pub fn parked(
     registry_says_shell: bool,
     now: At,
 ) -> Parked {
-    let (mut n_agents, n_shells, n_monitors, mut n_workflows) = match v.job {
+    let (mut n_agents, mut n_shells, n_monitors, mut n_workflows) = match v.job {
         Some(job) => {
-            let count =
-                |k: FanKind| Count::Exact(job.open_work().filter(|f| f.kind == k).count() as u16);
-            let workflows = job
-                .open_work()
-                .filter(|f| f.kind == FanKind::Workflow)
-                .count() as u16;
+            let count = |k: FanKind| job.open_work().filter(|f| f.kind == k).count() as u16;
             (
-                count(FanKind::Agent),
-                count(FanKind::Shell),
-                count(FanKind::Monitor),
-                workflows,
+                Count::Exact(count(FanKind::Agent)),
+                Count::Exact(count(FanKind::Shell)),
+                Count::Exact(count(FanKind::Monitor)),
+                count(FanKind::Workflow),
             )
         }
         None => {
@@ -307,7 +302,6 @@ pub fn parked(
             )
         }
     };
-    let mut n_shells = n_shells;
     if registry_says_shell {
         n_agents = Count::Exact(0);
         n_workflows = 0;
@@ -500,9 +494,7 @@ fn agent_level(
             state,
             label: meta.description.clone(),
             since: agent_started(v, agents, &meta.id, sidecar),
-            now: (state == NodeState::Running)
-                .then(|| sidecar.and_then(doing))
-                .flatten(),
+            now: sidecar.and_then(doing),
             children: agent_level(v, agents, known, Some(&meta.id), depth + 1),
         });
     }

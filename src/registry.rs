@@ -99,7 +99,11 @@ pub fn parse(bytes: &[u8]) -> Result<RegEntry, Problem> {
             Some("waiting") => RegStatus::Waiting(waiting_for(w.waiting_for.as_deref())),
             other => RegStatus::Other(other.unwrap_or_default().to_owned()),
         },
-        status_since: At(w.status_updated_at.or(w.updated_at).or(w.started_at).unwrap_or(0)),
+        status_since: At(w
+            .status_updated_at
+            .or(w.updated_at)
+            .or(w.started_at)
+            .unwrap_or(0)),
         name: nonempty(w.name).map(|value| Name {
             value,
             source: match w.name_source.as_deref() {
@@ -112,7 +116,10 @@ pub fn parse(bytes: &[u8]) -> Result<RegEntry, Problem> {
         pane: w.tmux.as_deref().and_then(PaneId::parse),
         remote_control: nonempty(w.bridge_session_id).is_some(),
         hidden: w.spare == Some(true) || parked_job.is_some(),
-        job: nonempty(w.job_id).or(parked_job).as_deref().and_then(JobId::parse),
+        job: nonempty(w.job_id)
+            .or(parked_job)
+            .as_deref()
+            .and_then(JobId::parse),
     })
 }
 
@@ -183,7 +190,11 @@ pub fn sessions_dir(dir: &ConfigDir) -> PathBuf {
 }
 
 pub fn ps_argv(pids: &[Pid]) -> Vec<String> {
-    let list = pids.iter().map(|p| p.0.to_string()).collect::<Vec<_>>().join(",");
+    let list = pids
+        .iter()
+        .map(|p| p.0.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     vec!["-o".into(), "pid=,lstart=".into(), "-p".into(), list]
 }
 
@@ -203,7 +214,11 @@ pub fn discover_config_dirs(home: &Path, env_override: Option<&Path>) -> Vec<Con
     if let Ok(listing) = std::fs::read_dir(home) {
         let mut extra: Vec<PathBuf> = listing
             .flatten()
-            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(".claude-")))
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(".claude-"))
+            })
             .map(|e| e.path())
             .filter(|p| p.join("sessions").is_dir())
             .collect();
@@ -233,7 +248,8 @@ pub(crate) mod tests {
         pub(crate) fn new(name: &str) -> Scratch {
             static NEXT: AtomicU32 = AtomicU32::new(0);
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("agentically-{name}-{}-{n}", std::process::id()));
+            let path =
+                std::env::temp_dir().join(format!("agentically-{name}-{}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Scratch(path)
@@ -265,9 +281,12 @@ pub(crate) mod tests {
         }
     }
 
-
     fn fixture(name: &str) -> Vec<u8> {
-        std::fs::read(format!("{}/tests/fixtures/registry/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+        std::fs::read(format!(
+            "{}/tests/fixtures/registry/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -278,7 +297,13 @@ pub(crate) mod tests {
         assert_eq!(e.status_since, At(1791150090000));
         assert_eq!(e.proc_start.as_str(), "Sun Oct  4 21:17:02 2026");
         assert_eq!(e.kind, ProcKind::Interactive);
-        assert_eq!(e.name, Some(Name { value: "demo-repo-e7".into(), source: NameSource::Derived }));
+        assert_eq!(
+            e.name,
+            Some(Name {
+                value: "demo-repo-e7".into(),
+                source: NameSource::Derived
+            })
+        );
         assert!(!e.hidden && !e.remote_control && e.job.is_none());
     }
 
@@ -314,14 +339,26 @@ pub(crate) mod tests {
         assert!(e.remote_control);
         assert_eq!(e.status_since, At(1791150200000));
         let w = parse(br#"{"pid":1,"procStart":"x","sessionId":"s","status":"waiting","waitingFor":"oracle consult"}"#).unwrap();
-        assert_eq!(w.status, RegStatus::Waiting(WaitingFor::Other("oracle consult".into())));
+        assert_eq!(
+            w.status,
+            RegStatus::Waiting(WaitingFor::Other("oracle consult".into()))
+        );
     }
 
     #[test]
     fn identity_fields_are_required_and_named() {
-        assert_eq!(parse(br#"{"procStart":"x","sessionId":"s"}"#), Err(Problem::MissingField("pid")));
-        assert_eq!(parse(br#"{"pid":1,"sessionId":"s"}"#), Err(Problem::MissingField("procStart")));
-        assert_eq!(parse(br#"{"pid":1,"procStart":"x"}"#), Err(Problem::MissingField("sessionId")));
+        assert_eq!(
+            parse(br#"{"procStart":"x","sessionId":"s"}"#),
+            Err(Problem::MissingField("pid"))
+        );
+        assert_eq!(
+            parse(br#"{"pid":1,"sessionId":"s"}"#),
+            Err(Problem::MissingField("procStart"))
+        );
+        assert_eq!(
+            parse(br#"{"pid":1,"procStart":"x"}"#),
+            Err(Problem::MissingField("sessionId"))
+        );
         assert_eq!(parse(br#"{"pid":1,"procSt"#), Err(Problem::Unparsable));
     }
 
@@ -343,26 +380,45 @@ pub(crate) mod tests {
 
     #[test]
     fn ps_output_is_trimmed_and_dead_pids_are_absent() {
-        let out = "    1 Mon Sep 28 08:09:25 2026    \n4242 Sun Oct  4 21:17:02 2026    \ngarbage\n";
+        let out =
+            "    1 Mon Sep 28 08:09:25 2026    \n4242 Sun Oct  4 21:17:02 2026    \ngarbage\n";
         let starts = parse_ps(out);
         assert_eq!(starts.len(), 2);
         let reg = parse(&fixture("interactive_waiting.json")).unwrap();
         assert_eq!(starts.get(&Pid(4242)), Some(&reg.proc_start));
-        assert_eq!(starts.get(&Pid(1)).map(ProcStart::as_str), Some("Mon Sep 28 08:09:25 2026"));
-        assert_eq!(ps_argv(&[Pid(1), Pid(4242)]), ["-o", "pid=,lstart=", "-p", "1,4242"]);
+        assert_eq!(
+            starts.get(&Pid(1)).map(ProcStart::as_str),
+            Some("Mon Sep 28 08:09:25 2026")
+        );
+        assert_eq!(
+            ps_argv(&[Pid(1), Pid(4242)]),
+            ["-o", "pid=,lstart=", "-p", "1,4242"]
+        );
     }
 
     #[test]
     fn scan_reads_only_pid_records() {
         let home = Scratch::new("registry-scan");
         let dir = ConfigDir(home.path().join(".claude"));
-        home.write(".claude/sessions/4242.json", &fixture("interactive_waiting.json"));
+        home.write(
+            ".claude/sessions/4242.json",
+            &fixture("interactive_waiting.json"),
+        );
         home.write(".claude/sessions/4242.abc123.key", b"SECRET_SENTINEL_x9");
         home.write(".claude/sessions/.fleetview-heartbeat", b"");
         home.write(".claude/sessions/77.json", b"{\"pid\":77}");
         let (entries, problems) = scan(&dir);
-        assert_eq!(entries.iter().map(|e| e.pid).collect::<Vec<_>>(), [Pid(4242)]);
-        assert_eq!(problems, [(sessions_dir(&dir).join("77.json"), Problem::MissingField("procStart"))]);
+        assert_eq!(
+            entries.iter().map(|e| e.pid).collect::<Vec<_>>(),
+            [Pid(4242)]
+        );
+        assert_eq!(
+            problems,
+            [(
+                sessions_dir(&dir).join("77.json"),
+                Problem::MissingField("procStart")
+            )]
+        );
     }
 
     #[test]
@@ -375,7 +431,13 @@ pub(crate) mod tests {
         home.write(".claude.json", b"{}");
         let h = home.path();
         let dirs = discover_config_dirs(h, Some(&h.join(".claude-personal")));
-        assert_eq!(dirs, [ConfigDir(h.join(".claude")), ConfigDir(h.join(".claude-personal"))]);
+        assert_eq!(
+            dirs,
+            [
+                ConfigDir(h.join(".claude")),
+                ConfigDir(h.join(".claude-personal"))
+            ]
+        );
         let dirs = discover_config_dirs(h, Some(&h.join("elsewhere/cfg")));
         assert_eq!(dirs.len(), 3);
         assert_eq!(dirs.last(), Some(&ConfigDir(h.join("elsewhere/cfg"))));

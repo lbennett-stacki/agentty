@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::jobs::{FanItem, FanKind, Job, JobState, Tempo};
 use crate::model::{
-    AgentId, At, AutoGroup, ConfigDir, Count, Cost, Ctx, Detail, DiagSource, Diagnostic,
+    AgentId, At, AutoGroup, ConfigDir, Cost, Count, Ctx, Detail, DiagSource, Diagnostic,
     JobOutcome, Meta, Need, Node, NodeKind, NodeState, OpenTarget, PaneInfo, Parked, Problem, Row,
     RowKey, SafeText, Snapshot, Status, TaskId, TaskOutcome, Tree, UserKey, WaitingFor,
 };
@@ -43,7 +43,10 @@ pub fn snapshot<'a>(
     world_diagnostics: &[Diagnostic],
     now: At,
 ) -> Snapshot {
-    let mut snap = Snapshot { rows: Vec::new(), diagnostics: world_diagnostics.to_vec() };
+    let mut snap = Snapshot {
+        rows: Vec::new(),
+        diagnostics: world_diagnostics.to_vec(),
+    };
     for v in sessions.filter(|v| !v.reg.hidden) {
         unknown_values(v.dir, Some(v.reg), v.job, &mut snap.diagnostics);
         snap.rows.push(live_row(v, now));
@@ -55,11 +58,19 @@ pub fn snapshot<'a>(
     snap
 }
 
-fn unknown_values(dir: &ConfigDir, reg: Option<&RegEntry>, job: Option<&Job>, out: &mut Vec<Diagnostic>) {
+fn unknown_values(
+    dir: &ConfigDir,
+    reg: Option<&RegEntry>,
+    job: Option<&Job>,
+    out: &mut Vec<Diagnostic>,
+) {
     let mut push = |source, field, value: &str, path: String| {
         out.push(Diagnostic {
             source,
-            problem: Problem::UnknownValue { field, value: value.to_owned() },
+            problem: Problem::UnknownValue {
+                field,
+                value: value.to_owned(),
+            },
             path,
         })
     };
@@ -99,7 +110,11 @@ pub fn live_row(v: SessionView<'_>, now: At) -> Row {
     let agents = agents(&v);
     let (status, since) = status(&v, &agents, now);
     let title = title(&v);
-    let key = RowKey::Live { dir: v.dir.clone(), pid: v.reg.pid, proc_start: v.reg.proc_start.clone() };
+    let key = RowKey::Live {
+        dir: v.dir.clone(),
+        pid: v.reg.pid,
+        proc_start: v.reg.proc_start.clone(),
+    };
     let user_key = match &v.reg.job {
         Some(job) => UserKey::Job(job.clone()),
         None => UserKey::Session(v.reg.session_id.clone()),
@@ -122,10 +137,17 @@ pub fn live_row(v: SessionView<'_>, now: At) -> Row {
 pub fn exited_row(v: ExitedView<'_>) -> Row {
     let outcome = job_outcome(v.job);
     let title = pick_title(v.facts, None, Some(v.job), &v.job.id.0);
-    let now = v.job.detail.clone().unwrap_or_else(|| SafeText::ours(outcome_word(outcome)));
+    let now = v
+        .job
+        .detail
+        .clone()
+        .unwrap_or_else(|| SafeText::ours(outcome_word(outcome)));
     let facts = v.facts;
     Row {
-        key: RowKey::Exited { dir: v.dir.clone(), job: v.job.id.clone() },
+        key: RowKey::Exited {
+            dir: v.dir.clone(),
+            job: v.job.id.clone(),
+        },
         user_key: UserKey::Job(v.job.id.clone()),
         auto_group: AutoGroup::Finished,
         status: Status::Exited(outcome),
@@ -144,7 +166,9 @@ pub fn exited_row(v: ExitedView<'_>) -> Row {
         tree: Tree::default(),
         detail: Detail {
             last_prompt: facts.and_then(|f| f.last_prompt.clone()),
-            last_text: facts.and_then(|f| f.last_text.as_ref()).map(|t| t.first_line.clone()),
+            last_text: facts
+                .and_then(|f| f.last_text.as_ref())
+                .map(|t| t.first_line.clone()),
             open_tasks: Vec::new(),
             pending: Vec::new(),
             cwd: v.job.worktree_path.clone().unwrap_or_default(),
@@ -152,7 +176,11 @@ pub fn exited_row(v: ExitedView<'_>) -> Row {
             session_id: v.job.session_id.clone(),
             job_id: Some(v.job.id.clone()),
         },
-        open: OpenTarget::Attach { dir: v.dir.clone(), job: v.job.id.clone(), title: title.as_str().to_owned() },
+        open: OpenTarget::Attach {
+            dir: v.dir.clone(),
+            job: v.job.id.clone(),
+            title: title.as_str().to_owned(),
+        },
         title,
     }
 }
@@ -171,7 +199,9 @@ pub fn status(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> (Status
     match &v.reg.status {
         RegStatus::Waiting(w) => (Status::NeedsYou(need_of(w, v.facts)), reg_since),
         RegStatus::Busy => {
-            let Some(facts) = v.facts else { return (Status::Working, reg_since) };
+            let Some(facts) = v.facts else {
+                return (Status::Working, reg_since);
+            };
             match facts.turn {
                 Turn::Open { since } => (Status::Working, reg_since.max(since)),
                 Turn::Closed { at, .. } | Turn::Interrupted { at } => {
@@ -189,18 +219,27 @@ pub fn status(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> (Status
                 && job.tempo == Some(Tempo::Blocked)
                 && let Some(needs) = &job.needs
             {
-                return (Status::NeedsYou(Need::JobQuestion(needs.clone())), reg_since);
+                return (
+                    Status::NeedsYou(Need::JobQuestion(needs.clone())),
+                    reg_since,
+                );
             }
             let zero = Count::Exact(0);
             if let Some(p) = Parked::new(zero, zero, zero, 0, future_wakeup(v.facts, now)) {
                 return (Status::Parked(p), reg_since);
             }
             let asked_question = v.facts.is_some_and(|f| {
-                matches!(f.turn, Turn::Closed { .. }) && f.last_text.as_ref().is_some_and(|t| t.is_question)
+                matches!(f.turn, Turn::Closed { .. })
+                    && f.last_text.as_ref().is_some_and(|t| t.is_question)
             });
             (Status::Idle { asked_question }, reg_since)
         }
-        RegStatus::Other(_) => (Status::Idle { asked_question: false }, reg_since),
+        RegStatus::Other(_) => (
+            Status::Idle {
+                asked_question: false,
+            },
+            reg_since,
+        ),
     }
 }
 
@@ -211,28 +250,54 @@ fn future_wakeup(facts: Option<&Facts>, now: At) -> Option<At> {
 pub fn need_of(w: &WaitingFor, facts: Option<&Facts>) -> Need {
     match w {
         WaitingFor::Permission => Need::Permission {
-            tool: facts.and_then(|f| f.last_tool.as_ref()).filter(|t| !t.answered).map(|t| t.name.clone()),
+            tool: facts
+                .and_then(|f| f.last_tool.as_ref())
+                .filter(|t| !t.answered)
+                .map(|t| t.name.clone()),
         },
         other => Need::Waiting(other.clone()),
     }
 }
 
-pub fn parked(v: &SessionView<'_>, agents: &[AgentView<'_>], registry_says_shell: bool, now: At) -> Parked {
+pub fn parked(
+    v: &SessionView<'_>,
+    agents: &[AgentView<'_>],
+    registry_says_shell: bool,
+    now: At,
+) -> Parked {
     let (mut n_agents, n_shells, n_monitors, mut n_workflows) = match v.job {
         Some(job) => {
-            let count = |k: FanKind| Count::Exact(job.open_work().filter(|f| f.kind == k).count() as u16);
-            let workflows = job.open_work().filter(|f| f.kind == FanKind::Workflow).count() as u16;
-            (count(FanKind::Agent), count(FanKind::Shell), count(FanKind::Monitor), workflows)
+            let count =
+                |k: FanKind| Count::Exact(job.open_work().filter(|f| f.kind == k).count() as u16);
+            let workflows = job
+                .open_work()
+                .filter(|f| f.kind == FanKind::Workflow)
+                .count() as u16;
+            (
+                count(FanKind::Agent),
+                count(FanKind::Shell),
+                count(FanKind::Monitor),
+                workflows,
+            )
         }
         None => {
             let complete = v.facts.is_some_and(|f| f.horizon.from_start);
-            let count = |n: u16, exact: bool| if exact { Count::Exact(n) } else { Count::AtLeast(n) };
+            let count = |n: u16, exact: bool| {
+                if exact {
+                    Count::Exact(n)
+                } else {
+                    Count::AtLeast(n)
+                }
+            };
             let fold = |k| v.facts.map_or(0, |f| f.open_count(k));
             let pending = match v.facts.map(|f| f.turn) {
                 Some(Turn::Closed { pending_agents, .. }) => pending_agents,
                 _ => 0,
             };
-            let running = agents.iter().filter(|(_, s, _)| *s == NodeState::Running).count() as u16;
+            let running = agents
+                .iter()
+                .filter(|(_, s, _)| *s == NodeState::Running)
+                .count() as u16;
             let agents_n = fold(BgKind::Agent).max(running).max(pending);
             (
                 count(agents_n, complete || v.subagents.is_some()),
@@ -252,16 +317,32 @@ pub fn parked(v: &SessionView<'_>, agents: &[AgentView<'_>], registry_says_shell
     } else if !n_agents.is_positive() && n_workflows == 0 {
         n_agents = Count::AtLeast(1);
     }
-    Parked::new(n_agents, n_shells, n_monitors, n_workflows, future_wakeup(v.facts, now))
-        .expect("the registry floors above guarantee a positive count")
+    Parked::new(
+        n_agents,
+        n_shells,
+        n_monitors,
+        n_workflows,
+        future_wakeup(v.facts, now),
+    )
+    .expect("the registry floors above guarantee a positive count")
 }
 
 pub fn title(v: &SessionView<'_>) -> SafeText {
     let sid = &v.reg.session_id.0;
-    pick_title(v.facts, v.reg.name.as_ref(), v.job, &sid[..sid.len().min(8)])
+    pick_title(
+        v.facts,
+        v.reg.name.as_ref(),
+        v.job,
+        &sid[..sid.len().min(8)],
+    )
 }
 
-fn pick_title(facts: Option<&Facts>, reg_name: Option<&Name>, job: Option<&Job>, fallback: &str) -> SafeText {
+fn pick_title(
+    facts: Option<&Facts>,
+    reg_name: Option<&Name>,
+    job: Option<&Job>,
+    fallback: &str,
+) -> SafeText {
     let titles = facts.map(|f| &f.titles);
     let strong_name = reg_name.filter(|n| matches!(n.source, NameSource::User | NameSource::Auto));
     [
@@ -281,20 +362,32 @@ fn pick_title(facts: Option<&Facts>, reg_name: Option<&Name>, job: Option<&Job>,
 pub fn now_line(status: &Status, v: &SessionView<'_>, now: At) -> SafeText {
     let fresh_detail = v
         .job
-        .filter(|j| j.updated_at.is_some_and(|u| now.millis_since(u) <= DETAIL_FRESH_MS))
+        .filter(|j| {
+            j.updated_at
+                .is_some_and(|u| now.millis_since(u) <= DETAIL_FRESH_MS)
+        })
         .and_then(|j| j.detail.clone());
     let empty = SafeText::default;
     match status {
         Status::NeedsYou(Need::Permission { .. }) => {
             let label = WaitingFor::Permission.label();
-            match v.facts.and_then(|f| f.last_tool.as_ref()).filter(|t| !t.answered) {
-                Some(call) => SafeText::redact(&format!("{label} · {}", tool_line(&call.name, &call.summary).as_str())),
+            match v
+                .facts
+                .and_then(|f| f.last_tool.as_ref())
+                .filter(|t| !t.answered)
+            {
+                Some(call) => SafeText::redact(&format!(
+                    "{label} · {}",
+                    tool_line(&call.name, &call.summary).as_str()
+                )),
                 None => SafeText::ours(label),
             }
         }
         Status::NeedsYou(Need::Waiting(w)) => SafeText::redact(w.label()),
         Status::NeedsYou(Need::JobQuestion(q)) => q.clone(),
-        Status::Working => fresh_detail.or_else(|| v.facts.and_then(doing)).unwrap_or_else(empty),
+        Status::Working => fresh_detail
+            .or_else(|| v.facts.and_then(doing))
+            .unwrap_or_else(empty),
         Status::Parked(p) => SafeText::redact(&format!("waiting on {}", describe_parked(p))),
         Status::Idle { .. } => fresh_detail
             .or_else(|| {
@@ -305,12 +398,18 @@ pub fn now_line(status: &Status, v: &SessionView<'_>, now: At) -> SafeText {
                     .or_else(|| f.last_prompt.clone())
             })
             .unwrap_or_else(empty),
-        Status::Exited(o) => v.job.and_then(|j| j.detail.clone()).unwrap_or_else(|| SafeText::ours(outcome_word(*o))),
+        Status::Exited(o) => v
+            .job
+            .and_then(|j| j.detail.clone())
+            .unwrap_or_else(|| SafeText::ours(outcome_word(*o))),
     }
 }
 
 fn doing(f: &Facts) -> Option<SafeText> {
-    let tool = f.last_tool.as_ref().map(|t| (t.at, tool_line(&t.name, &t.summary)));
+    let tool = f
+        .last_tool
+        .as_ref()
+        .map(|t| (t.at, tool_line(&t.name, &t.summary)));
     let text = f.last_text.as_ref().map(|t| (t.at, t.first_line.clone()));
     match (tool, text) {
         (Some(a), Some(b)) => Some(if a.0 >= b.0 { a.1 } else { b.1 }),
@@ -336,7 +435,10 @@ pub fn tree(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> Tree {
         t.live.push(Node {
             id: item.id,
             kind: match item.kind {
-                Work::Agent => NodeKind::Agent { agent_type: "agent".to_owned(), model: None },
+                Work::Agent => NodeKind::Agent {
+                    agent_type: "agent".to_owned(),
+                    model: None,
+                },
                 Work::Shell => NodeKind::Shell,
                 Work::Monitor => NodeKind::Monitor,
                 Work::Workflow => NodeKind::Workflow,
@@ -354,7 +456,10 @@ pub fn tree(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> Tree {
             kind: NodeKind::Wakeup,
             state: NodeState::Running,
             label: SafeText::redact(&format!("wakes {}", clock(at))),
-            since: v.facts.and_then(|f| f.last_activity).unwrap_or(v.reg.status_since),
+            since: v
+                .facts
+                .and_then(|f| f.last_activity)
+                .unwrap_or(v.reg.status_since),
             now: None,
             children: Tree::default(),
         });
@@ -388,11 +493,16 @@ fn agent_level(
         }
         t.live.push(Node {
             id: TaskId::from(&meta.id),
-            kind: NodeKind::Agent { agent_type: meta.agent_type.clone(), model: meta.model.clone() },
+            kind: NodeKind::Agent {
+                agent_type: meta.agent_type.clone(),
+                model: meta.model.clone(),
+            },
             state,
             label: meta.description.clone(),
             since: agent_started(v, agents, &meta.id, sidecar),
-            now: (state == NodeState::Running).then(|| sidecar.and_then(doing)).flatten(),
+            now: (state == NodeState::Running)
+                .then(|| sidecar.and_then(doing))
+                .flatten(),
             children: agent_level(v, agents, known, Some(&meta.id), depth + 1),
         });
     }
@@ -400,7 +510,9 @@ fn agent_level(
 }
 
 fn fan_agent<'a>(job: Option<&'a Job>, id: &AgentId) -> Option<&'a FanItem> {
-    job?.fan.iter().find(|f| f.kind == FanKind::Agent && f.id == id.0)
+    job?.fan
+        .iter()
+        .find(|f| f.kind == FanKind::Agent && f.id == id.0)
 }
 
 fn fan_state(f: &FanItem) -> NodeState {
@@ -411,7 +523,12 @@ fn fan_state(f: &FanItem) -> NodeState {
     }
 }
 
-fn agent_started(v: &SessionView<'_>, agents: &[AgentView<'_>], id: &AgentId, own: Option<&Facts>) -> At {
+fn agent_started(
+    v: &SessionView<'_>,
+    agents: &[AgentView<'_>],
+    id: &AgentId,
+    own: Option<&Facts>,
+) -> At {
     let task = TaskId::from(id);
     v.facts
         .into_iter()
@@ -450,8 +567,16 @@ fn roster<'a>(v: &SessionView<'a>) -> Vec<RosterItem<'a>> {
                     _ => return None,
                 };
                 let id = TaskId(f.id.clone());
-                let described = v.facts.and_then(|facts| facts.open_bg.get(&id)).map(|b| &b.label);
-                Some(RosterItem { label: described.unwrap_or(&f.label), id, kind, since: f.started_at })
+                let described = v
+                    .facts
+                    .and_then(|facts| facts.open_bg.get(&id))
+                    .map(|b| &b.label);
+                Some(RosterItem {
+                    label: described.unwrap_or(&f.label),
+                    id,
+                    kind,
+                    since: f.started_at,
+                })
             })
             .collect();
     }
@@ -476,13 +601,19 @@ pub fn meta(v: &SessionView<'_>) -> Meta {
     let statusline = v.statusline.filter(|s| usage.is_none_or(|u| s.at >= u.at));
     let percent = statusline.and_then(|s| {
         let window = s.window.filter(|w| *w > 0)?;
-        let pct = s.ctx_used_pct.or_else(|| usage.map(|u| u.ctx_tokens as f64 * 100.0 / window as f64))?;
+        let pct = s
+            .ctx_used_pct
+            .or_else(|| usage.map(|u| u.ctx_tokens as f64 * 100.0 / window as f64))?;
         Some(Ctx::Percent(pct.round().clamp(0.0, 100.0) as u8))
     });
     let cost = statusline
         .and_then(|s| s.cost_usd)
         .map(Cost::Live)
-        .or_else(|| v.facts.and_then(|f| f.exit).map(|e| Cost::Final(e.cost_usd)));
+        .or_else(|| {
+            v.facts
+                .and_then(|f| f.exit)
+                .map(|e| Cost::Final(e.cost_usd))
+        });
     Meta {
         branch: branch(v.facts, v.job),
         worktree: worktree(v.facts, v.job),
@@ -497,16 +628,23 @@ pub fn meta(v: &SessionView<'_>) -> Meta {
 
 fn branch(facts: Option<&Facts>, job: Option<&Job>) -> Option<String> {
     facts
-        .and_then(|f| f.branch.clone().or_else(|| f.worktree.as_ref().and_then(|w| w.branch.clone())))
+        .and_then(|f| {
+            f.branch
+                .clone()
+                .or_else(|| f.worktree.as_ref().and_then(|w| w.branch.clone()))
+        })
         .or_else(|| job.and_then(|j| j.worktree_branch.clone()))
 }
 
 fn worktree(facts: Option<&Facts>, job: Option<&Job>) -> Option<String> {
-    facts.and_then(|f| f.worktree.as_ref()).map(|w| w.name.clone()).or_else(|| {
-        job.and_then(|j| j.worktree_path.as_ref())
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-    })
+    facts
+        .and_then(|f| f.worktree.as_ref())
+        .map(|w| w.name.clone())
+        .or_else(|| {
+            job.and_then(|j| j.worktree_path.as_ref())
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+        })
 }
 
 fn prs(facts: Option<&Facts>, job: Option<&Job>) -> Vec<u32> {
@@ -538,7 +676,9 @@ pub fn detail(v: &SessionView<'_>, now: At) -> Detail {
     }
     Detail {
         last_prompt: facts.and_then(|f| f.last_prompt.clone()),
-        last_text: facts.and_then(|f| f.last_text.as_ref()).map(|t| t.first_line.clone()),
+        last_text: facts
+            .and_then(|f| f.last_text.as_ref())
+            .map(|t| t.first_line.clone()),
         open_tasks: v
             .tasks
             .iter()
@@ -555,7 +695,11 @@ pub fn detail(v: &SessionView<'_>, now: At) -> Detail {
 
 pub fn open_target(v: &SessionView<'_>, title: &SafeText) -> OpenTarget {
     if let Some(job) = &v.reg.job {
-        return OpenTarget::Attach { dir: v.dir.clone(), job: job.clone(), title: title.as_str().to_owned() };
+        return OpenTarget::Attach {
+            dir: v.dir.clone(),
+            job: job.clone(),
+            title: title.as_str().to_owned(),
+        };
     }
     match &v.reg.pane {
         Some(pane) if v.panes.iter().any(|p| &p.id == pane) => OpenTarget::Pane(pane.clone()),
@@ -653,7 +797,10 @@ mod tests {
             entrypoint: "cli".into(),
             status,
             status_since: at(0),
-            name: Some(Name { value: "repo-e7".into(), source: NameSource::Derived }),
+            name: Some(Name {
+                value: "repo-e7".into(),
+                source: NameSource::Derived,
+            }),
             pane: PaneId::parse("0:@1.%7"),
             remote_control: false,
             job: None,
@@ -662,7 +809,12 @@ mod tests {
     }
 
     fn bg_reg(status: RegStatus) -> RegEntry {
-        RegEntry { kind: ProcKind::Bg, pane: None, job: Some(JobId("9b3323e1".into())), ..reg(status) }
+        RegEntry {
+            kind: ProcKind::Bg,
+            pane: None,
+            job: Some(JobId("9b3323e1".into())),
+            ..reg(status)
+        }
     }
 
     fn job() -> Job {
@@ -697,15 +849,30 @@ mod tests {
     }
 
     fn bg(kind: BgKind, label: &str) -> BgItem {
-        BgItem { kind, label: SafeText::redact(label), started: at(-30), tool_use: None }
+        BgItem {
+            kind,
+            label: SafeText::redact(label),
+            started: at(-30),
+            tool_use: None,
+        }
     }
 
     fn tool(name: &str, summary: &str, answered: bool, t: At) -> ToolCall {
-        ToolCall { id: ToolUseId("toolu_1".into()), name: name.into(), summary: SafeText::redact(summary), at: t, answered }
+        ToolCall {
+            id: ToolUseId("toolu_1".into()),
+            name: name.into(),
+            summary: SafeText::redact(summary),
+            at: t,
+            answered,
+        }
     }
 
     fn text(s: &str, t: At) -> TextBlock {
-        TextBlock { first_line: SafeText::redact(s), at: t, is_question: s.ends_with('?') }
+        TextBlock {
+            first_line: SafeText::redact(s),
+            at: t,
+            is_question: s.ends_with('?'),
+        }
     }
 
     fn agent_meta(id: &str, parent: Option<&str>) -> AgentMeta {
@@ -780,12 +947,21 @@ mod tests {
 
     #[test]
     fn waiting_permission_names_the_dangling_tool_and_shows_it_on_the_now_line() {
-        let fx = Fx::new(reg(RegStatus::Waiting(WaitingFor::Permission)))
-            .with_facts(|f| f.last_tool = Some(tool("Bash", "Run migration against staging", false, at(-3))));
+        let fx = Fx::new(reg(RegStatus::Waiting(WaitingFor::Permission))).with_facts(|f| {
+            f.last_tool = Some(tool("Bash", "Run migration against staging", false, at(-3)))
+        });
         let (st, since) = fx.status();
-        assert_eq!(st, Status::NeedsYou(Need::Permission { tool: Some("Bash".into()) }));
+        assert_eq!(
+            st,
+            Status::NeedsYou(Need::Permission {
+                tool: Some("Bash".into())
+            })
+        );
         assert_eq!(since, fx.reg.status_since);
-        assert_eq!(now_line(&st, &fx.view(), T0).as_str(), "permission prompt · Bash: Run migration against staging");
+        assert_eq!(
+            now_line(&st, &fx.view(), T0).as_str(),
+            "permission prompt · Bash: Run migration against staging"
+        );
     }
 
     #[test]
@@ -813,19 +989,26 @@ mod tests {
 
     #[test]
     fn busy_with_no_transcript_is_working() {
-        assert_eq!(Fx::new(reg(RegStatus::Busy)).status(), (Status::Working, at(0)));
+        assert_eq!(
+            Fx::new(reg(RegStatus::Busy)).status(),
+            (Status::Working, at(0))
+        );
     }
 
     #[test]
     fn busy_with_an_open_turn_is_working_since_the_turn_opened() {
-        let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.turn = Turn::Open { since: at(40) });
+        let fx =
+            Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.turn = Turn::Open { since: at(40) });
         assert_eq!(fx.status(), (Status::Working, at(40)));
     }
 
     #[test]
     fn busy_with_a_closed_turn_is_parked_and_its_since_is_the_turn_end_not_status_updated_at() {
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
-            f.turn = Turn::Closed { at: at(90), pending_agents: 2 };
+            f.turn = Turn::Closed {
+                at: at(90),
+                pending_agents: 2,
+            };
         });
         let (st, since) = fx.status();
         assert!(matches!(st, Status::Parked(_)), "{st:?}");
@@ -835,7 +1018,8 @@ mod tests {
 
     #[test]
     fn busy_after_an_interrupt_is_parked_since_the_interrupt() {
-        let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.turn = Turn::Interrupted { at: at(12) });
+        let fx =
+            Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.turn = Turn::Interrupted { at: at(12) });
         let (st, since) = fx.status();
         assert!(matches!(st, Status::Parked(_)), "{st:?}");
         assert_eq!(since, at(12));
@@ -860,98 +1044,185 @@ mod tests {
     fn shell_with_no_visible_launch_is_parked_on_at_least_one_shell() {
         let fx = Fx::new(reg(RegStatus::Shell)).with_facts(|_| {});
         let p = fx.parked();
-        assert_eq!((p.shells(), p.agents(), p.monitors()), (Count::AtLeast(1), Count::Exact(0), Count::AtLeast(0)));
-        assert_eq!(now_line(&Status::Parked(p), &fx.view(), T0).as_str(), "waiting on 1+ shell");
+        assert_eq!(
+            (p.shells(), p.agents(), p.monitors()),
+            (Count::AtLeast(1), Count::Exact(0), Count::AtLeast(0))
+        );
+        assert_eq!(
+            now_line(&Status::Parked(p), &fx.view(), T0).as_str(),
+            "waiting on 1+ shell"
+        );
         assert_eq!(fx.status().1, fx.reg.status_since);
     }
 
     #[test]
     fn shell_trusts_the_registry_over_a_done_job_state() {
         let mut fx = Fx::new(bg_reg(RegStatus::Shell));
-        fx.job = Some(Job { state: JobState::Done, tempo: Some(Tempo::Idle), fan: vec![fan("b1", FanKind::Shell, false)], ..job() });
+        fx.job = Some(Job {
+            state: JobState::Done,
+            tempo: Some(Tempo::Idle),
+            fan: vec![fan("b1", FanKind::Shell, false)],
+            ..job()
+        });
         assert_eq!(fx.parked().shells(), Count::Exact(1));
     }
 
     #[test]
     fn shell_never_shows_agents_from_a_stale_fold() {
         let fx = Fx::new(reg(RegStatus::Shell)).with_facts(|f| {
-            f.horizon = Horizon { from_start: true, first_at: None };
-            f.open_bg.insert(TaskId("a1".into()), bg(BgKind::Agent, "stale"));
-            f.open_bg.insert(TaskId("a2".into()), bg(BgKind::Agent, "stale"));
-            f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Monitor, "watch CI"));
+            f.horizon = Horizon {
+                from_start: true,
+                first_at: None,
+            };
+            f.open_bg
+                .insert(TaskId("a1".into()), bg(BgKind::Agent, "stale"));
+            f.open_bg
+                .insert(TaskId("a2".into()), bg(BgKind::Agent, "stale"));
+            f.open_bg
+                .insert(TaskId("b1".into()), bg(BgKind::Monitor, "watch CI"));
         });
         let p = fx.parked();
-        assert_eq!((p.agents(), p.monitors(), p.shells()), (Count::Exact(0), Count::Exact(1), Count::Exact(0)));
+        assert_eq!(
+            (p.agents(), p.monitors(), p.shells()),
+            (Count::Exact(0), Count::Exact(1), Count::Exact(0))
+        );
     }
 
     #[test]
     fn idle_bg_job_blocked_with_a_question_needs_you() {
         let mut fx = Fx::new(bg_reg(RegStatus::Idle));
-        fx.job = Some(Job { tempo: Some(Tempo::Blocked), needs: Some(SafeText::ours("Ship to prod?")), ..job() });
+        fx.job = Some(Job {
+            tempo: Some(Tempo::Blocked),
+            needs: Some(SafeText::ours("Ship to prod?")),
+            ..job()
+        });
         let (st, _) = fx.status();
-        assert_eq!(st, Status::NeedsYou(Need::JobQuestion(SafeText::ours("Ship to prod?"))));
+        assert_eq!(
+            st,
+            Status::NeedsYou(Need::JobQuestion(SafeText::ours("Ship to prod?")))
+        );
         assert_eq!(now_line(&st, &fx.view(), T0).as_str(), "Ship to prod?");
     }
 
     #[test]
     fn job_needs_are_ignored_unless_the_registry_says_idle() {
         for status in [RegStatus::Busy, RegStatus::Shell] {
-            let mut fx = Fx::new(bg_reg(status)).with_facts(|f| f.turn = Turn::Closed { at: at(5), pending_agents: 1 });
-            fx.job = Some(Job { tempo: Some(Tempo::Blocked), needs: Some(SafeText::ours("Old question?")), ..job() });
+            let mut fx = Fx::new(bg_reg(status)).with_facts(|f| {
+                f.turn = Turn::Closed {
+                    at: at(5),
+                    pending_agents: 1,
+                }
+            });
+            fx.job = Some(Job {
+                tempo: Some(Tempo::Blocked),
+                needs: Some(SafeText::ours("Old question?")),
+                ..job()
+            });
             assert!(matches!(fx.status().0, Status::Parked(_)));
         }
         let mut blocked_without_question = Fx::new(bg_reg(RegStatus::Idle));
-        blocked_without_question.job = Some(Job { tempo: Some(Tempo::Blocked), ..job() });
-        assert_eq!(blocked_without_question.status().0, Status::Idle { asked_question: false });
+        blocked_without_question.job = Some(Job {
+            tempo: Some(Tempo::Blocked),
+            ..job()
+        });
+        assert_eq!(
+            blocked_without_question.status().0,
+            Status::Idle {
+                asked_question: false
+            }
+        );
     }
 
     #[test]
     fn idle_with_a_future_wakeup_is_parked_on_the_wakeup_only() {
         let fx = Fx::new(reg(RegStatus::Idle)).with_facts(|f| {
             f.wakeup = Some(at(600));
-            f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Shell, "stale"));
+            f.open_bg
+                .insert(TaskId("b1".into()), bg(BgKind::Shell, "stale"));
         });
         let p = fx.parked();
         assert_eq!(p.wakeup(), Some(at(600)));
         assert!(!p.shells().is_positive() && !p.agents().is_positive());
 
         let past = Fx::new(reg(RegStatus::Idle)).with_facts(|f| f.wakeup = Some(at(-1)));
-        assert_eq!(past.status().0, Status::Idle { asked_question: false });
+        assert_eq!(
+            past.status().0,
+            Status::Idle {
+                asked_question: false
+            }
+        );
     }
 
     #[test]
     fn idle_ending_on_a_question_is_idle_asked_question_never_needs_you() {
         let fx = Fx::new(reg(RegStatus::Idle)).with_facts(|f| {
-            f.turn = Turn::Closed { at: at(-10), pending_agents: 0 };
+            f.turn = Turn::Closed {
+                at: at(-10),
+                pending_agents: 0,
+            };
             f.last_text = Some(text("Want me to wire the statusline tee now?", at(-11)));
         });
-        assert_eq!(fx.status(), (Status::Idle { asked_question: true }, at(0)));
+        assert_eq!(
+            fx.status(),
+            (
+                Status::Idle {
+                    asked_question: true
+                },
+                at(0)
+            )
+        );
 
         let statement = Fx::new(reg(RegStatus::Idle)).with_facts(|f| {
-            f.turn = Turn::Closed { at: at(-10), pending_agents: 0 };
+            f.turn = Turn::Closed {
+                at: at(-10),
+                pending_agents: 0,
+            };
             f.last_text = Some(text("Done.", at(-11)));
         });
-        assert_eq!(statement.status().0, Status::Idle { asked_question: false });
+        assert_eq!(
+            statement.status().0,
+            Status::Idle {
+                asked_question: false
+            }
+        );
     }
 
     #[test]
     fn unknown_registry_status_is_idle_and_reported() {
         let fx = Fx::new(reg(RegStatus::Other("napping".into())));
-        assert_eq!(fx.status().0, Status::Idle { asked_question: false });
+        assert_eq!(
+            fx.status().0,
+            Status::Idle {
+                asked_question: false
+            }
+        );
         let snap = snapshot([fx.view()].into_iter(), std::iter::empty(), &[], T0);
         assert_eq!(snap.rows.len(), 1);
         assert_eq!(
-            snap.diagnostics.iter().map(|d| (&d.source, &d.problem)).collect::<Vec<_>>(),
-            [(&DiagSource::Registry, &Problem::UnknownValue { field: "status", value: "napping".into() })]
+            snap.diagnostics
+                .iter()
+                .map(|d| (&d.source, &d.problem))
+                .collect::<Vec<_>>(),
+            [(
+                &DiagSource::Registry,
+                &Problem::UnknownValue {
+                    field: "status",
+                    value: "napping".into()
+                }
+            )]
         );
     }
 
     #[test]
     fn bg_fan_roster_wins_over_a_stale_fold() {
         let mut fx = Fx::new(bg_reg(RegStatus::Busy)).with_facts(|f| {
-            f.turn = Turn::Closed { at: at(5), pending_agents: 0 };
+            f.turn = Turn::Closed {
+                at: at(5),
+                pending_agents: 0,
+            };
             for id in ["b1", "b2", "b3"] {
-                f.open_bg.insert(TaskId(id.into()), bg(BgKind::Shell, "stale"));
+                f.open_bg
+                    .insert(TaskId(id.into()), bg(BgKind::Shell, "stale"));
             }
         });
         fx.job = Some(Job {
@@ -969,16 +1240,29 @@ mod tests {
     #[test]
     fn pending_background_agents_beat_a_smaller_fold_count() {
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
-            f.turn = Turn::Closed { at: at(5), pending_agents: 3 };
-            f.open_bg.insert(TaskId("a1".into()), bg(BgKind::Agent, "one we saw"));
+            f.turn = Turn::Closed {
+                at: at(5),
+                pending_agents: 3,
+            };
+            f.open_bg
+                .insert(TaskId("a1".into()), bg(BgKind::Agent, "one we saw"));
         });
         assert_eq!(fx.parked().agents(), Count::AtLeast(3));
     }
 
     #[test]
     fn running_tree_agents_count_toward_parked_agents() {
-        let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.turn = Turn::Closed { at: at(5), pending_agents: 0 });
-        let (m1, m2, m3) = (agent_meta("a1", None), agent_meta("a2", None), agent_meta("a3", None));
+        let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
+            f.turn = Turn::Closed {
+                at: at(5),
+                pending_agents: 0,
+            }
+        });
+        let (m1, m2, m3) = (
+            agent_meta("a1", None),
+            agent_meta("a2", None),
+            agent_meta("a3", None),
+        );
         let agents: Vec<AgentView<'_>> = vec![
             (&m1, NodeState::Running, None),
             (&m2, NodeState::Running, None),
@@ -989,16 +1273,26 @@ mod tests {
 
     #[test]
     fn busy_with_a_closed_turn_and_no_evidence_is_parked_on_at_least_one_agent() {
-        let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.turn = Turn::Closed { at: at(5), pending_agents: 0 });
+        let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
+            f.turn = Turn::Closed {
+                at: at(5),
+                pending_agents: 0,
+            }
+        });
         assert_eq!(fx.parked().agents(), Count::AtLeast(1));
     }
 
     #[test]
     fn a_fold_that_saw_the_whole_file_reports_exact_counts() {
         let fx = Fx::new(reg(RegStatus::Shell)).with_facts(|f| {
-            f.horizon = Horizon { from_start: true, first_at: None };
-            f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Shell, "dev server"));
-            f.open_bg.insert(TaskId("b2".into()), bg(BgKind::Shell, "watcher"));
+            f.horizon = Horizon {
+                from_start: true,
+                first_at: None,
+            };
+            f.open_bg
+                .insert(TaskId("b1".into()), bg(BgKind::Shell, "dev server"));
+            f.open_bg
+                .insert(TaskId("b2".into()), bg(BgKind::Shell, "watcher"));
         });
         assert_eq!(fx.parked().shells(), Count::Exact(2));
     }
@@ -1007,7 +1301,14 @@ mod tests {
     fn describe_parked_pluralises_marks_lower_bounds_and_omits_zeros() {
         let p = Parked::new(Count::Exact(3), Count::AtLeast(1), Count::Exact(0), 1, None).unwrap();
         assert_eq!(describe_parked(&p), "3 agents, 1+ shell, 1 workflow");
-        let p = Parked::new(Count::Exact(1), Count::Exact(0), Count::Exact(2), 0, Some(at(60))).unwrap();
+        let p = Parked::new(
+            Count::Exact(1),
+            Count::Exact(0),
+            Count::Exact(2),
+            0,
+            Some(at(60)),
+        )
+        .unwrap();
         let s = describe_parked(&p);
         assert!(s.starts_with("1 agent, 2 monitors · wakes "), "{s}");
     }
@@ -1021,19 +1322,37 @@ mod tests {
                 ai: Some(SafeText::ours("ai")),
             };
         });
-        fx.reg.name = Some(Name { value: "user-name".into(), source: NameSource::User });
-        fx.job = Some(Job { name: Some("job-name".into()), ..job() });
+        fx.reg.name = Some(Name {
+            value: "user-name".into(),
+            source: NameSource::User,
+        });
+        fx.job = Some(Job {
+            name: Some("job-name".into()),
+            ..job()
+        });
 
         let mut seen = Vec::new();
         let titles = |fx: &Fx| fx.facts.as_ref().unwrap().titles.clone();
         seen.push(title(&fx.view()));
-        fx.facts.as_mut().unwrap().titles = Titles { custom: None, ..titles(&fx) };
+        fx.facts.as_mut().unwrap().titles = Titles {
+            custom: None,
+            ..titles(&fx)
+        };
         seen.push(title(&fx.view()));
-        fx.facts.as_mut().unwrap().titles = Titles { agent_name: None, ..titles(&fx) };
+        fx.facts.as_mut().unwrap().titles = Titles {
+            agent_name: None,
+            ..titles(&fx)
+        };
         seen.push(title(&fx.view()));
-        fx.reg.name = Some(Name { value: "derived-e7".into(), source: NameSource::Derived });
+        fx.reg.name = Some(Name {
+            value: "derived-e7".into(),
+            source: NameSource::Derived,
+        });
         seen.push(title(&fx.view()));
-        fx.facts.as_mut().unwrap().titles = Titles { ai: None, ..titles(&fx) };
+        fx.facts.as_mut().unwrap().titles = Titles {
+            ai: None,
+            ..titles(&fx)
+        };
         seen.push(title(&fx.view()));
         fx.job = Some(job());
         seen.push(title(&fx.view()));
@@ -1041,13 +1360,28 @@ mod tests {
         seen.push(title(&fx.view()));
 
         let seen: Vec<&str> = seen.iter().map(SafeText::as_str).collect();
-        assert_eq!(seen, ["custom", "agent-name", "user-name", "ai", "job-name", "derived-e7", "0f1e2d3c"]);
+        assert_eq!(
+            seen,
+            [
+                "custom",
+                "agent-name",
+                "user-name",
+                "ai",
+                "job-name",
+                "derived-e7",
+                "0f1e2d3c"
+            ]
+        );
     }
 
     #[test]
     fn auto_named_registry_title_beats_ai_title() {
-        let mut fx = Fx::new(reg(RegStatus::Idle)).with_facts(|f| f.titles.ai = Some(SafeText::ours("ai")));
-        fx.reg.name = Some(Name { value: "auto-name".into(), source: NameSource::Auto });
+        let mut fx =
+            Fx::new(reg(RegStatus::Idle)).with_facts(|f| f.titles.ai = Some(SafeText::ours("ai")));
+        fx.reg.name = Some(Name {
+            value: "auto-name".into(),
+            source: NameSource::Auto,
+        });
         assert_eq!(title(&fx.view()).as_str(), "auto-name");
     }
 
@@ -1058,18 +1392,26 @@ mod tests {
             f.last_text = Some(text("Let me check the tests.", at(-20)));
             f.last_tool = Some(tool("Edit", "stack_plan.rs", false, at(-5)));
         });
-        assert_eq!(now_line(&Status::Working, &fx.view(), T0).as_str(), "Edit: stack_plan.rs");
+        assert_eq!(
+            now_line(&Status::Working, &fx.view(), T0).as_str(),
+            "Edit: stack_plan.rs"
+        );
     }
 
     #[test]
     fn idle_now_line_prefers_away_summary_then_last_text_then_last_prompt() {
-        let idle = Status::Idle { asked_question: false };
+        let idle = Status::Idle {
+            asked_question: false,
+        };
         let mut fx = Fx::new(reg(RegStatus::Idle)).with_facts(|f| {
             f.away_summary = Some(SafeText::ours("Fee logic done; client-side next"));
             f.last_text = Some(text("All green.", at(-5)));
             f.last_prompt = Some(SafeText::ours("fix the fees"));
         });
-        assert_eq!(now_line(&idle, &fx.view(), T0).as_str(), "Fee logic done; client-side next");
+        assert_eq!(
+            now_line(&idle, &fx.view(), T0).as_str(),
+            "Fee logic done; client-side next"
+        );
         fx.facts.as_mut().unwrap().away_summary = None;
         assert_eq!(now_line(&idle, &fx.view(), T0).as_str(), "All green.");
         fx.facts.as_mut().unwrap().last_text = None;
@@ -1082,31 +1424,53 @@ mod tests {
             f.turn = Turn::Open { since: at(-60) };
             f.last_tool = Some(tool("Grep", "broken anchors", false, at(-5)));
         });
-        fx.job = Some(Job { detail: Some(SafeText::ours("auditing links")), updated_at: Some(at(-60)), ..job() });
-        assert_eq!(now_line(&Status::Working, &fx.view(), T0).as_str(), "auditing links");
+        fx.job = Some(Job {
+            detail: Some(SafeText::ours("auditing links")),
+            updated_at: Some(at(-60)),
+            ..job()
+        });
+        assert_eq!(
+            now_line(&Status::Working, &fx.view(), T0).as_str(),
+            "auditing links"
+        );
         fx.job.as_mut().unwrap().updated_at = Some(at(-40 * 60));
-        assert_eq!(now_line(&Status::Working, &fx.view(), T0).as_str(), "Grep: broken anchors");
+        assert_eq!(
+            now_line(&Status::Working, &fx.view(), T0).as_str(),
+            "Grep: broken anchors"
+        );
     }
 
     fn usage_at(t: At) -> Usage {
-        Usage { ctx_tokens: 412_000, model: "claude-opus-5-5".into(), at: t }
+        Usage {
+            ctx_tokens: 412_000,
+            model: "claude-opus-5-5".into(),
+            at: t,
+        }
     }
 
     fn statusline(t: At, window: Option<u64>) -> Statusline {
-        Statusline { ctx_used_pct: Some(41.2), window, cost_usd: Some(3.41), at: t }
+        Statusline {
+            ctx_used_pct: Some(41.2),
+            window,
+            cost_usd: Some(3.41),
+            at: t,
+        }
     }
 
     #[test]
     fn never_shows_a_cost_or_percent_without_an_authoritative_source() {
-        let no_statusline = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.usage = Some(usage_at(at(-5))));
+        let no_statusline =
+            Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.usage = Some(usage_at(at(-5))));
         let m = meta(&no_statusline.view());
         assert_eq!((m.ctx, m.cost), (Some(Ctx::Tokens(412_000)), None));
 
-        let mut no_window = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.usage = Some(usage_at(at(-5))));
+        let mut no_window =
+            Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.usage = Some(usage_at(at(-5))));
         no_window.statusline = Some(statusline(at(-1), None));
         assert_eq!(meta(&no_window.view()).ctx, Some(Ctx::Tokens(412_000)));
 
-        let mut stale = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.usage = Some(usage_at(at(-5))));
+        let mut stale =
+            Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.usage = Some(usage_at(at(-5))));
         stale.statusline = Some(statusline(at(-300), Some(1_000_000)));
         let m = meta(&stale.view());
         assert_eq!((m.ctx, m.cost), (Some(Ctx::Tokens(412_000)), None));
@@ -1121,9 +1485,15 @@ mod tests {
         let mut fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| f.usage = Some(usage_at(at(-5))));
         fx.statusline = Some(statusline(at(-1), Some(1_000_000)));
         let m = meta(&fx.view());
-        assert_eq!((m.ctx, m.cost), (Some(Ctx::Percent(41)), Some(Cost::Live(3.41))));
+        assert_eq!(
+            (m.ctx, m.cost),
+            (Some(Ctx::Percent(41)), Some(Cost::Live(3.41)))
+        );
 
-        fx.statusline = Some(Statusline { ctx_used_pct: None, ..statusline(at(-1), Some(1_000_000)) });
+        fx.statusline = Some(Statusline {
+            ctx_used_pct: None,
+            ..statusline(at(-1), Some(1_000_000))
+        });
         assert_eq!(meta(&fx.view()).ctx, Some(Ctx::Percent(41)));
     }
 
@@ -1132,8 +1502,16 @@ mod tests {
         let mut facts = Facts::default();
         facts.exit = Some(ExitTotals { cost_usd: 2.17 });
         let dir = ConfigDir(PathBuf::from("/home/u/.claude"));
-        let j = Job { state: JobState::Done, ended_at: Some(at(-3600)), ..job() };
-        let row = exited_row(ExitedView { dir: &dir, job: &j, facts: Some(&facts) });
+        let j = Job {
+            state: JobState::Done,
+            ended_at: Some(at(-3600)),
+            ..job()
+        };
+        let row = exited_row(ExitedView {
+            dir: &dir,
+            job: &j,
+            facts: Some(&facts),
+        });
         assert_eq!(row.meta.cost, Some(Cost::Final(2.17)));
         assert_eq!(row.status, Status::Exited(JobOutcome::Done));
         assert_eq!(row.auto_group, AutoGroup::Finished);
@@ -1162,7 +1540,8 @@ mod tests {
     #[test]
     fn tree_nests_depth_two_agents_and_collapses_finished_per_level() {
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
-            f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Monitor, "Watch CI"));
+            f.open_bg
+                .insert(TaskId("b1".into()), bg(BgKind::Monitor, "Watch CI"));
         });
         let ms = [
             agent_meta("a1", None),
@@ -1181,11 +1560,22 @@ mod tests {
             (&ms[5], NodeState::Orphaned, None),
         ];
         let t = tree(&fx.view(), &agents, T0);
-        let top: Vec<(&str, NodeState)> = t.live.iter().map(|n| (n.id.0.as_str(), n.state)).collect();
-        assert_eq!(top, [("a1", NodeState::Running), ("b1", NodeState::Running)]);
+        let top: Vec<(&str, NodeState)> =
+            t.live.iter().map(|n| (n.id.0.as_str(), n.state)).collect();
+        assert_eq!(
+            top,
+            [("a1", NodeState::Running), ("b1", NodeState::Running)]
+        );
         assert_eq!(t.finished, 2);
         let a1 = &t.live[0];
-        assert_eq!(a1.children.live.iter().map(|n| n.id.0.as_str()).collect::<Vec<_>>(), ["c1"]);
+        assert_eq!(
+            a1.children
+                .live
+                .iter()
+                .map(|n| n.id.0.as_str())
+                .collect::<Vec<_>>(),
+            ["c1"]
+        );
         assert_eq!(a1.children.finished, 2);
         assert_eq!(t.live[1].kind, NodeKind::Monitor);
     }
@@ -1193,21 +1583,26 @@ mod tests {
     #[test]
     fn running_agent_shows_its_sidecar_action_and_launch_time() {
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
-            f.open_bg.insert(TaskId("a1".into()), bg(BgKind::Agent, "audit"));
+            f.open_bg
+                .insert(TaskId("a1".into()), bg(BgKind::Agent, "audit"));
         });
         let mut side = Facts::default();
         side.last_tool = Some(tool("Read", "guide.md", false, at(-1)));
         let m = agent_meta("a1", None);
         let t = tree(&fx.view(), &[(&m, NodeState::Running, Some(&side))], T0);
         assert_eq!(t.live.len(), 1, "the open_bg agent must not appear twice");
-        assert_eq!(t.live[0].now.as_ref().map(SafeText::as_str), Some("Read: guide.md"));
+        assert_eq!(
+            t.live[0].now.as_ref().map(SafeText::as_str),
+            Some("Read: guide.md")
+        );
         assert_eq!(t.live[0].since, at(-30));
     }
 
     #[test]
     fn bg_tree_takes_liveness_and_leaves_from_the_fan() {
         let mut fx = Fx::new(bg_reg(RegStatus::Busy)).with_facts(|f| {
-            f.open_bg.insert(TaskId("bstale".into()), bg(BgKind::Shell, "stale shell"));
+            f.open_bg
+                .insert(TaskId("bstale".into()), bg(BgKind::Shell, "stale shell"));
         });
         fx.job = Some(Job {
             fan: vec![
@@ -1220,19 +1615,39 @@ mod tests {
             ..job()
         });
         let (m1, m2) = (agent_meta("a1", None), agent_meta("a2", None));
-        let agents: Vec<AgentView<'_>> = vec![(&m1, NodeState::Running, None), (&m2, NodeState::Orphaned, None)];
+        let agents: Vec<AgentView<'_>> = vec![
+            (&m1, NodeState::Running, None),
+            (&m2, NodeState::Orphaned, None),
+        ];
         let t = tree(&fx.view(), &agents, T0);
-        let live: Vec<(&str, NodeState)> = t.live.iter().map(|n| (n.id.0.as_str(), n.state)).collect();
-        assert_eq!(live, [("a2", NodeState::Running), ("a9", NodeState::Running), ("b1", NodeState::Running)]);
+        let live: Vec<(&str, NodeState)> =
+            t.live.iter().map(|n| (n.id.0.as_str(), n.state)).collect();
+        assert_eq!(
+            live,
+            [
+                ("a2", NodeState::Running),
+                ("a9", NodeState::Running),
+                ("b1", NodeState::Running)
+            ]
+        );
         assert_eq!(t.finished, 1);
     }
 
     #[test]
     fn bg_shell_leaves_use_the_launch_description_over_the_fan_command() {
         let mut fx = Fx::new(bg_reg(RegStatus::Shell)).with_facts(|f| {
-            f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Shell, "Wait for CI on main"));
+            f.open_bg.insert(
+                TaskId("b1".into()),
+                bg(BgKind::Shell, "Wait for CI on main"),
+            );
         });
-        fx.job = Some(Job { fan: vec![fan("b1", FanKind::Shell, false), fan("b2", FanKind::Shell, false)], ..job() });
+        fx.job = Some(Job {
+            fan: vec![
+                fan("b1", FanKind::Shell, false),
+                fan("b2", FanKind::Shell, false),
+            ],
+            ..job()
+        });
         let t = tree(&fx.view(), &[], T0);
         let labels: Vec<&str> = t.live.iter().map(|n| n.label.as_str()).collect();
         assert_eq!(labels[0], "Wait for CI on main");
@@ -1243,36 +1658,72 @@ mod tests {
     fn a_future_wakeup_is_a_tree_leaf() {
         let fx = Fx::new(reg(RegStatus::Idle)).with_facts(|f| f.wakeup = Some(at(300)));
         let t = tree(&fx.view(), &[], T0);
-        assert_eq!(t.live.iter().map(|n| n.kind.clone()).collect::<Vec<_>>(), [NodeKind::Wakeup]);
+        assert_eq!(
+            t.live.iter().map(|n| n.kind.clone()).collect::<Vec<_>>(),
+            [NodeKind::Wakeup]
+        );
     }
 
     #[test]
     fn open_target_offers_a_pane_only_when_tmux_lists_it() {
         let mut fx = Fx::new(reg(RegStatus::Idle));
         let t = SafeText::ours("t");
-        fx.panes = vec![PaneInfo { id: PaneId::parse("%7").unwrap(), pid: Pid(1) }];
-        assert_eq!(open_target(&fx.view(), &t), OpenTarget::Pane(PaneId::parse("%7").unwrap()));
-        fx.panes = vec![PaneInfo { id: PaneId::parse("%8").unwrap(), pid: Pid(1) }];
-        assert_eq!(open_target(&fx.view(), &t), OpenTarget::Unreachable("tmux pane %7 is gone".into()));
+        fx.panes = vec![PaneInfo {
+            id: PaneId::parse("%7").unwrap(),
+            pid: Pid(1),
+        }];
+        assert_eq!(
+            open_target(&fx.view(), &t),
+            OpenTarget::Pane(PaneId::parse("%7").unwrap())
+        );
+        fx.panes = vec![PaneInfo {
+            id: PaneId::parse("%8").unwrap(),
+            pid: Pid(1),
+        }];
+        assert_eq!(
+            open_target(&fx.view(), &t),
+            OpenTarget::Unreachable("tmux pane %7 is gone".into())
+        );
     }
 
     #[test]
     fn open_target_outside_tmux_names_the_surface() {
-        let mut fx = Fx::new(RegEntry { pane: None, entrypoint: "claude-vscode".into(), ..reg(RegStatus::Idle) });
+        let mut fx = Fx::new(RegEntry {
+            pane: None,
+            entrypoint: "claude-vscode".into(),
+            ..reg(RegStatus::Idle)
+        });
         let t = SafeText::ours("t");
-        assert_eq!(open_target(&fx.view(), &t), OpenTarget::Unreachable("running in VS Code".into()));
+        assert_eq!(
+            open_target(&fx.view(), &t),
+            OpenTarget::Unreachable("running in VS Code".into())
+        );
         fx.reg.entrypoint = "cli".into();
-        assert_eq!(open_target(&fx.view(), &t), OpenTarget::Unreachable("running in a terminal outside tmux".into()));
+        assert_eq!(
+            open_target(&fx.view(), &t),
+            OpenTarget::Unreachable("running in a terminal outside tmux".into())
+        );
     }
 
     #[test]
     fn open_target_attaches_bg_jobs_live_or_exited() {
         let fx = Fx::new(bg_reg(RegStatus::Busy));
-        let expected = OpenTarget::Attach { dir: fx.dir.clone(), job: JobId("9b3323e1".into()), title: "t".into() };
+        let expected = OpenTarget::Attach {
+            dir: fx.dir.clone(),
+            job: JobId("9b3323e1".into()),
+            title: "t".into(),
+        };
         assert_eq!(open_target(&fx.view(), &SafeText::ours("t")), expected);
 
-        let j = Job { name: Some("t".into()), ..job() };
-        let row = exited_row(ExitedView { dir: &fx.dir, job: &j, facts: None });
+        let j = Job {
+            name: Some("t".into()),
+            ..job()
+        };
+        let row = exited_row(ExitedView {
+            dir: &fx.dir,
+            job: &j,
+            facts: None,
+        });
         assert_eq!(row.open, expected);
     }
 
@@ -1281,35 +1732,83 @@ mod tests {
         let mut fx = Fx::new(reg(RegStatus::Idle));
         assert_eq!(auto_group(&fx.view()), AutoGroup::Elsewhere);
         fx.repo = Some(PathBuf::from("/work/repo"));
-        assert_eq!(auto_group(&fx.view()), AutoGroup::Repo(PathBuf::from("/work/repo")));
-        let member = TeamMember { name: "w".into(), pane: PaneId::parse("%7"), active: true };
-        fx.team = Some(Team { name: "session-0f1e2d3c".into(), lead: None, members: vec![member] });
-        assert_eq!(auto_group(&fx.view()), AutoGroup::Team("session-0f1e2d3c".into()));
-        fx.team = Some(Team { name: "other".into(), lead: None, members: Vec::new() });
-        assert_eq!(auto_group(&fx.view()), AutoGroup::Repo(PathBuf::from("/work/repo")));
+        assert_eq!(
+            auto_group(&fx.view()),
+            AutoGroup::Repo(PathBuf::from("/work/repo"))
+        );
+        let member = TeamMember {
+            name: "w".into(),
+            pane: PaneId::parse("%7"),
+            active: true,
+        };
+        fx.team = Some(Team {
+            name: "session-0f1e2d3c".into(),
+            lead: None,
+            members: vec![member],
+        });
+        assert_eq!(
+            auto_group(&fx.view()),
+            AutoGroup::Team("session-0f1e2d3c".into())
+        );
+        fx.team = Some(Team {
+            name: "other".into(),
+            lead: None,
+            members: Vec::new(),
+        });
+        assert_eq!(
+            auto_group(&fx.view()),
+            AutoGroup::Repo(PathBuf::from("/work/repo"))
+        );
     }
 
     #[test]
     fn snapshot_hides_spares_keys_bg_rows_by_job_and_reports_unknown_job_values() {
-        let hidden = Fx::new(RegEntry { hidden: true, ..reg(RegStatus::Idle) });
+        let hidden = Fx::new(RegEntry {
+            hidden: true,
+            ..reg(RegStatus::Idle)
+        });
         let mut live_bg = Fx::new(bg_reg(RegStatus::Idle));
-        live_bg.job = Some(Job { fan: vec![fan("x1", FanKind::Other("cron".into()), false)], ..job() });
+        live_bg.job = Some(Job {
+            fan: vec![fan("x1", FanKind::Other("cron".into()), false)],
+            ..job()
+        });
         let dir = ConfigDir(PathBuf::from("/home/u/.claude"));
-        let gone = Job { id: JobId("deadbeef".into()), state: JobState::Other("zombie".into()), ..job() };
+        let gone = Job {
+            id: JobId("deadbeef".into()),
+            state: JobState::Other("zombie".into()),
+            ..job()
+        };
         let snap = snapshot(
             [hidden.view(), live_bg.view()].into_iter(),
-            [ExitedView { dir: &dir, job: &gone, facts: None }].into_iter(),
+            [ExitedView {
+                dir: &dir,
+                job: &gone,
+                facts: None,
+            }]
+            .into_iter(),
             &[],
             T0,
         );
         let keys: Vec<&UserKey> = snap.rows.iter().map(|r| &r.user_key).collect();
-        assert_eq!(keys, [&UserKey::Job(JobId("9b3323e1".into())), &UserKey::Job(JobId("deadbeef".into()))]);
+        assert_eq!(
+            keys,
+            [
+                &UserKey::Job(JobId("9b3323e1".into())),
+                &UserKey::Job(JobId("deadbeef".into()))
+            ]
+        );
         let problems: Vec<&Problem> = snap.diagnostics.iter().map(|d| &d.problem).collect();
         assert_eq!(
             problems,
             [
-                &Problem::UnknownValue { field: "fan.kind", value: "cron".into() },
-                &Problem::UnknownValue { field: "state", value: "zombie".into() },
+                &Problem::UnknownValue {
+                    field: "fan.kind",
+                    value: "cron".into()
+                },
+                &Problem::UnknownValue {
+                    field: "state",
+                    value: "zombie".into()
+                },
             ]
         );
         assert_eq!(snap.rows[1].status, Status::Exited(JobOutcome::Unknown));
@@ -1318,11 +1817,20 @@ mod tests {
     #[test]
     fn detail_lists_open_tasks_and_pending_work() {
         let mut fx = Fx::new(reg(RegStatus::Shell)).with_facts(|f| {
-            f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Shell, "dev server"));
+            f.open_bg
+                .insert(TaskId("b1".into()), bg(BgKind::Shell, "dev server"));
         });
         fx.tasks = vec![
-            Task { id: 1, subject: SafeText::ours("write tests"), status: TaskStatus::InProgress },
-            Task { id: 2, subject: SafeText::ours("scaffold"), status: TaskStatus::Completed },
+            Task {
+                id: 1,
+                subject: SafeText::ours("write tests"),
+                status: TaskStatus::InProgress,
+            },
+            Task {
+                id: 2,
+                subject: SafeText::ours("scaffold"),
+                status: TaskStatus::Completed,
+            },
         ];
         let d = detail(&fx.view(), T0);
         assert_eq!(d.open_tasks, [SafeText::ours("write tests")]);

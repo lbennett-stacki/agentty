@@ -105,7 +105,13 @@ pub fn parse(id: JobId, bytes: &[u8]) -> Result<Job, Problem> {
     let w: WireJob = serde_json::from_slice(bytes).map_err(|_| Problem::Unparsable)?;
     let updated_at = w.updated_at.as_deref().and_then(At::parse_iso);
     let mut prs: Vec<u32> = Vec::new();
-    for n in w.children.iter().flatten().filter(|c| c.kind.as_deref() == Some("pr")).filter_map(pr_number) {
+    for n in w
+        .children
+        .iter()
+        .flatten()
+        .filter(|c| c.kind.as_deref() == Some("pr"))
+        .filter_map(pr_number)
+    {
         if !prs.contains(&n) {
             prs.push(n);
         }
@@ -139,7 +145,11 @@ pub fn parse(id: JobId, bytes: &[u8]) -> Result<Job, Problem> {
         remote_control: nonempty(w.bridge_session_id).is_some(),
         prs,
         updated_at,
-        ended_at: w.last_terminal_at.as_deref().and_then(At::parse_iso).or(updated_at),
+        ended_at: w
+            .last_terminal_at
+            .as_deref()
+            .and_then(At::parse_iso)
+            .or(updated_at),
     })
 }
 
@@ -161,7 +171,17 @@ fn pr_number(child: &WireChild) -> Option<u32> {
         serde_json::Value::String(s) => s.parse().ok(),
         n => n.as_u64()?.try_into().ok(),
     };
-    let from_href = || child.href.as_deref()?.rsplit_once("/pull/")?.1.split(['/', '#', '?']).next()?.parse().ok();
+    let from_href = || {
+        child
+            .href
+            .as_deref()?
+            .rsplit_once("/pull/")?
+            .1
+            .split(['/', '#', '?'])
+            .next()?
+            .parse()
+            .ok()
+    };
     from_id().or_else(from_href)
 }
 
@@ -177,7 +197,13 @@ fn fan_item(w: WireFan) -> FanItem {
     };
     let raw = w.label.unwrap_or_default();
     let label = match kind {
-        FanKind::Shell => SafeText::redact(SafeText::redact(&raw).as_str().split(' ').next().unwrap_or("")),
+        FanKind::Shell => SafeText::redact(
+            SafeText::redact(&raw)
+                .as_str()
+                .split(' ')
+                .next()
+                .unwrap_or(""),
+        ),
         _ => SafeText::redact(&raw),
     };
     FanItem {
@@ -196,7 +222,9 @@ pub fn jobs_dir(dir: &ConfigDir) -> PathBuf {
 
 impl Job {
     pub fn open_work(&self) -> impl Iterator<Item = &FanItem> {
-        self.fan.iter().filter(|f| f.done_at.is_none() && f.kind != FanKind::Todo)
+        self.fan
+            .iter()
+            .filter(|f| f.done_at.is_none() && f.kind != FanKind::Todo)
     }
 }
 
@@ -205,7 +233,11 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> Vec<u8> {
-        std::fs::read(format!("{}/tests/fixtures/jobs/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+        std::fs::read(format!(
+            "{}/tests/fixtures/jobs/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
     }
 
     fn live() -> Job {
@@ -224,16 +256,32 @@ mod tests {
     fn live_state_maps_every_used_field() {
         let job = live();
         assert_eq!(job.id, JobId("c0ffee00".into()));
-        assert_eq!(job.session_id, Some(SessionId("c0ffee00-1111-4222-8333-444444444444".into())));
-        assert_eq!((job.state.clone(), job.tempo.clone()), (JobState::Working, Some(Tempo::Active)));
-        assert_eq!(job.detail.as_ref().map(SafeText::as_str), Some("Fee logic done; client side next"));
+        assert_eq!(
+            job.session_id,
+            Some(SessionId("c0ffee00-1111-4222-8333-444444444444".into()))
+        );
+        assert_eq!(
+            (job.state.clone(), job.tempo.clone()),
+            (JobState::Working, Some(Tempo::Active))
+        );
+        assert_eq!(
+            job.detail.as_ref().map(SafeText::as_str),
+            Some("Fee logic done; client side next")
+        );
         assert_eq!(job.needs, None);
         assert_eq!(job.prs, [1346, 1347]);
         assert!(!job.remote_control);
         assert_eq!(job.updated_at, At::parse_iso("2026-10-04T10:15:30.500Z"));
-        assert_eq!(job.ended_at, job.updated_at, "no lastTerminalAt: fall back to updatedAt");
+        assert_eq!(
+            job.ended_at, job.updated_at,
+            "no lastTerminalAt: fall back to updatedAt"
+        );
         assert_eq!(job.worktree_branch.as_deref(), Some("fees"));
-        assert!(job.transcript.as_ref().is_some_and(|p| p.ends_with("c0ffee00-1111-4222-8333-444444444444.jsonl")));
+        assert!(
+            job.transcript
+                .as_ref()
+                .is_some_and(|p| p.ends_with("c0ffee00-1111-4222-8333-444444444444.jsonl"))
+        );
     }
 
     #[test]
@@ -242,8 +290,18 @@ mod tests {
         let open: Vec<_> = job.open_work().map(|f| f.id.as_str()).collect();
         assert_eq!(open, ["a1", "b1", "x1"]);
         let monitor = job.fan.iter().find(|f| f.id == "b2").unwrap();
-        assert_eq!((monitor.done_at, monitor.failed), (Some(At(1791150009000)), true));
-        assert_eq!(job.fan.iter().find(|f| f.id == "todo:2").unwrap().started_at, None);
+        assert_eq!(
+            (monitor.done_at, monitor.failed),
+            (Some(At(1791150009000)), true)
+        );
+        assert_eq!(
+            job.fan
+                .iter()
+                .find(|f| f.id == "todo:2")
+                .unwrap()
+                .started_at,
+            None
+        );
     }
 
     #[test]
@@ -253,7 +311,10 @@ mod tests {
         let job = parse(JobId("b10cked0".into()), &fixture("blocked_future.json")).unwrap();
         assert_eq!(job.state, JobState::Other("resuming".into()));
         assert_eq!(job.tempo, Some(Tempo::Other("dozing".into())));
-        assert_eq!(job.needs.as_ref().map(SafeText::as_str), Some("Which database should the migration target?"));
+        assert_eq!(
+            job.needs.as_ref().map(SafeText::as_str),
+            Some("Which database should the migration target?")
+        );
         assert!(job.fan.is_empty() && job.prs.is_empty());
         assert!(job.remote_control);
         assert_eq!(job.ended_at, At::parse_iso("2026-10-04T10:05:00Z"));

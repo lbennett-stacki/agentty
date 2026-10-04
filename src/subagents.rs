@@ -64,7 +64,12 @@ pub struct Subagents {
 impl Subagents {
     pub fn new(main_transcript: &Path) -> Subagents {
         let dir = main_transcript.with_extension("").join("subagents");
-        Subagents { dir, dir_mtime_ms: None, entries: BTreeMap::new(), open: BTreeMap::new() }
+        Subagents {
+            dir,
+            dir_mtime_ms: None,
+            entries: BTreeMap::new(),
+            open: BTreeMap::new(),
+        }
     }
 
     pub fn refresh(&mut self, main: &Facts, alive: bool, budget: u64) -> (u64, Vec<Problem>) {
@@ -104,7 +109,10 @@ impl Subagents {
                         problems.push(Problem::Deferred);
                         continue;
                     }
-                    let path = self.entries[&id].meta_path.with_extension("").with_extension("jsonl");
+                    let path = self.entries[&id]
+                        .meta_path
+                        .with_extension("")
+                        .with_extension("jsonl");
                     match Transcript::open(path, Window::Sidecar) {
                         Ok(t) => {
                             spent += t.stamp().len.min(Window::Sidecar.max_bytes());
@@ -122,7 +130,10 @@ impl Subagents {
 
     fn drop_cursor(&mut self, id: &AgentId) {
         if let Some(t) = self.open.remove(id) {
-            self.entries.get_mut(id).expect("every cursor has an entry").kept = Some(t.facts().clone());
+            self.entries
+                .get_mut(id)
+                .expect("every cursor has an entry")
+                .kept = Some(t.facts().clone());
         }
     }
 
@@ -140,7 +151,9 @@ impl Subagents {
     fn relist(&mut self, problems: &mut Vec<Problem>) {
         let mut seen: Vec<(AgentId, Option<String>, PathBuf)> = Vec::new();
         for (path, run) in meta_files(&self.dir) {
-            let Some(id) = agent_id_of(&path) else { continue };
+            let Some(id) = agent_id_of(&path) else {
+                continue;
+            };
             seen.push((id, run, path));
         }
         let keep: Vec<&AgentId> = seen.iter().map(|(id, _, _)| id).collect();
@@ -159,7 +172,12 @@ impl Subagents {
                             Ok(meta) => {
                                 self.entries.insert(
                                     id,
-                                    Entry { meta_path: path, meta_mtime_ms: mtime, meta, kept: None },
+                                    Entry {
+                                        meta_path: path,
+                                        meta_mtime_ms: mtime,
+                                        meta,
+                                        kept: None,
+                                    },
                                 );
                             }
                             Err(p) => problems.push(p),
@@ -174,8 +192,12 @@ impl Subagents {
     // Claude Code merges `stoppedByUser` into an existing meta file in place, which does not
     // move the directory mtime that gates re-listing.
     fn reparse_if_moved(&mut self, id: &AgentId, problems: &mut Vec<Problem>) {
-        let Some(e) = self.entries.get_mut(id) else { return };
-        let Ok(stamp) = FileStamp::of(&e.meta_path) else { return };
+        let Some(e) = self.entries.get_mut(id) else {
+            return;
+        };
+        let Ok(stamp) = FileStamp::of(&e.meta_path) else {
+            return;
+        };
         if stamp.mtime_ms == e.meta_mtime_ms {
             return;
         }
@@ -234,15 +256,26 @@ fn agent_id_of(path: &Path) -> Option<AgentId> {
 
 fn meta_files(dir: &Path) -> Vec<(PathBuf, Option<String>)> {
     fn metas_in(dir: &Path) -> Vec<PathBuf> {
-        let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
         rd.filter_map(Result::ok)
             .map(|e| e.path())
-            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".meta.json")))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".meta.json"))
+            })
             .collect()
     }
-    let mut out: Vec<(PathBuf, Option<String>)> = metas_in(dir).into_iter().map(|p| (p, None)).collect();
+    let mut out: Vec<(PathBuf, Option<String>)> =
+        metas_in(dir).into_iter().map(|p| (p, None)).collect();
     if let Ok(runs) = std::fs::read_dir(dir.join("workflows")) {
-        for run in runs.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()) {
+        for run in runs
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+        {
             let run_id = run.file_name().and_then(|n| n.to_str()).map(str::to_owned);
             out.extend(metas_in(&run).into_iter().map(|p| (p, run_id.clone())));
         }
@@ -268,7 +301,10 @@ pub fn agent_state(
     if relaunched && alive && parent_running {
         return NodeState::Running;
     }
-    if let Some(Notice { at, outcome: Some(outcome) }) = notice
+    if let Some(Notice {
+        at,
+        outcome: Some(outcome),
+    }) = notice
         && sidecar_last_activity.is_none_or(|a| a <= at)
     {
         return NodeState::Finished(outcome);
@@ -309,10 +345,16 @@ mod tests {
         }
     }
     fn done(n: u32) -> Option<Notice> {
-        Some(Notice { at: at(n), outcome: Some(TaskOutcome::Completed) })
+        Some(Notice {
+            at: at(n),
+            outcome: Some(TaskOutcome::Completed),
+        })
     }
     fn horizon(n: u32) -> Horizon {
-        Horizon { from_start: false, first_at: Some(at(n)) }
+        Horizon {
+            from_start: false,
+            first_at: Some(at(n)),
+        }
     }
 
     #[test]
@@ -328,7 +370,10 @@ mod tests {
         assert_eq!(m.workflow_run.as_deref(), Some("wf_abc123"));
         assert!(!m.stopped_by_user);
         assert_eq!(m.description.as_str(), "check docs");
-        assert_eq!(parse_meta(AgentId("x".into()), None, b"{not json").unwrap_err(), Problem::Unparsable);
+        assert_eq!(
+            parse_meta(AgentId("x".into()), None, b"{not json").unwrap_err(),
+            Problem::Unparsable
+        );
         let bare = parse_meta(AgentId("x".into()), None, b"{}").unwrap();
         assert_eq!((bare.agent_type.as_str(), bare.parent), ("", None));
     }
@@ -338,20 +383,142 @@ mod tests {
         let m = meta("a1", None, false);
         let killed = meta("a1", None, true);
         let cases: Vec<(&str, NodeState, NodeState)> = vec![
-            ("1 stoppedByUser beats everything", agent_state(&killed, true, None, Some(at(5)), false, None, horizon(0), true), NodeState::Killed),
-            ("2 relaunched after a notice", agent_state(&m, true, done(3), Some(at(2)), true, None, horizon(0), true), NodeState::Running),
-            ("2 relaunched but session dead", agent_state(&m, true, None, Some(at(2)), false, None, horizon(0), false), NodeState::Orphaned),
-            ("3 notice newer than the tail", agent_state(&m, false, done(5), Some(at(4)), true, None, horizon(0), true), NodeState::Finished(TaskOutcome::Completed)),
-            ("3 notice with no sidecar info", agent_state(&m, false, done(5), None, false, None, horizon(0), true), NodeState::Finished(TaskOutcome::Completed)),
-            ("3 skipped when the tail is newer", agent_state(&m, false, done(5), Some(at(6)), false, None, horizon(0), true), NodeState::Running),
-            ("3 needs an outcome", agent_state(&m, false, Some(Notice { at: at(5), outcome: None }), Some(at(4)), false, None, horizon(0), true), NodeState::Running),
-            ("4 tail looks finished", agent_state(&m, false, None, Some(at(4)), true, None, horizon(0), true), NodeState::Finished(TaskOutcome::AwaitingNotice)),
-            ("5 finished parent orphans an open child", agent_state(&m, true, None, Some(at(4)), false, Some(NodeState::Finished(TaskOutcome::Completed)), horizon(0), true), NodeState::Orphaned),
-            ("5 but a notified child stays finished", agent_state(&m, false, done(5), Some(at(4)), false, Some(NodeState::Killed), horizon(0), true), NodeState::Finished(TaskOutcome::Completed)),
-            ("6 dead session", agent_state(&m, false, None, Some(at(4)), false, None, horizon(0), false), NodeState::Orphaned),
-            ("7 quiet before the window", agent_state(&m, false, None, Some(at(1)), false, None, horizon(9), true), NodeState::Finished(TaskOutcome::AwaitingNotice)),
-            ("8 running", agent_state(&m, false, None, Some(at(10)), false, Some(NodeState::Running), horizon(9), true), NodeState::Running),
-            ("8 running with no sidecar yet", agent_state(&m, false, None, None, false, None, horizon(9), true), NodeState::Running),
+            (
+                "1 stoppedByUser beats everything",
+                agent_state(
+                    &killed,
+                    true,
+                    None,
+                    Some(at(5)),
+                    false,
+                    None,
+                    horizon(0),
+                    true,
+                ),
+                NodeState::Killed,
+            ),
+            (
+                "2 relaunched after a notice",
+                agent_state(&m, true, done(3), Some(at(2)), true, None, horizon(0), true),
+                NodeState::Running,
+            ),
+            (
+                "2 relaunched but session dead",
+                agent_state(&m, true, None, Some(at(2)), false, None, horizon(0), false),
+                NodeState::Orphaned,
+            ),
+            (
+                "3 notice newer than the tail",
+                agent_state(
+                    &m,
+                    false,
+                    done(5),
+                    Some(at(4)),
+                    true,
+                    None,
+                    horizon(0),
+                    true,
+                ),
+                NodeState::Finished(TaskOutcome::Completed),
+            ),
+            (
+                "3 notice with no sidecar info",
+                agent_state(&m, false, done(5), None, false, None, horizon(0), true),
+                NodeState::Finished(TaskOutcome::Completed),
+            ),
+            (
+                "3 skipped when the tail is newer",
+                agent_state(
+                    &m,
+                    false,
+                    done(5),
+                    Some(at(6)),
+                    false,
+                    None,
+                    horizon(0),
+                    true,
+                ),
+                NodeState::Running,
+            ),
+            (
+                "3 needs an outcome",
+                agent_state(
+                    &m,
+                    false,
+                    Some(Notice {
+                        at: at(5),
+                        outcome: None,
+                    }),
+                    Some(at(4)),
+                    false,
+                    None,
+                    horizon(0),
+                    true,
+                ),
+                NodeState::Running,
+            ),
+            (
+                "4 tail looks finished",
+                agent_state(&m, false, None, Some(at(4)), true, None, horizon(0), true),
+                NodeState::Finished(TaskOutcome::AwaitingNotice),
+            ),
+            (
+                "5 finished parent orphans an open child",
+                agent_state(
+                    &m,
+                    true,
+                    None,
+                    Some(at(4)),
+                    false,
+                    Some(NodeState::Finished(TaskOutcome::Completed)),
+                    horizon(0),
+                    true,
+                ),
+                NodeState::Orphaned,
+            ),
+            (
+                "5 but a notified child stays finished",
+                agent_state(
+                    &m,
+                    false,
+                    done(5),
+                    Some(at(4)),
+                    false,
+                    Some(NodeState::Killed),
+                    horizon(0),
+                    true,
+                ),
+                NodeState::Finished(TaskOutcome::Completed),
+            ),
+            (
+                "6 dead session",
+                agent_state(&m, false, None, Some(at(4)), false, None, horizon(0), false),
+                NodeState::Orphaned,
+            ),
+            (
+                "7 quiet before the window",
+                agent_state(&m, false, None, Some(at(1)), false, None, horizon(9), true),
+                NodeState::Finished(TaskOutcome::AwaitingNotice),
+            ),
+            (
+                "8 running",
+                agent_state(
+                    &m,
+                    false,
+                    None,
+                    Some(at(10)),
+                    false,
+                    Some(NodeState::Running),
+                    horizon(9),
+                    true,
+                ),
+                NodeState::Running,
+            ),
+            (
+                "8 running with no sidecar yet",
+                agent_state(&m, false, None, None, false, None, horizon(9), true),
+                NodeState::Running,
+            ),
         ];
         for (name, got, want) in cases {
             assert_eq!(got, want, "{name}");
@@ -376,7 +543,9 @@ mod tests {
     }
 
     fn states(s: &Subagents, main: &Facts, alive: bool) -> BTreeMap<String, (NodeState, bool)> {
-        s.agents(main, alive).map(|(m, st, f)| (m.id.0.clone(), (st, f.is_some()))).collect()
+        s.agents(main, alive)
+            .map(|(m, st, f)| (m.id.0.clone(), (st, f.is_some())))
+            .collect()
     }
 
     #[test]
@@ -400,11 +569,18 @@ mod tests {
         .map(|(k, v)| (k.to_owned(), v))
         .collect();
         assert_eq!(got, want);
-        let (meta, _, facts) = s.agents(&main, true).find(|(m, _, _)| m.id.0 == "a1").unwrap();
+        let (meta, _, facts) = s
+            .agents(&main, true)
+            .find(|(m, _, _)| m.id.0 == "a1")
+            .unwrap();
         assert_eq!(meta.parent, None);
         assert_eq!(facts.unwrap().last_tool.as_ref().unwrap().name, "Grep");
         let (spent, problems) = s.refresh(&main, true, 1 << 20);
-        assert_eq!((spent, problems.len()), (0, 0), "a quiet refresh opens nothing");
+        assert_eq!(
+            (spent, problems.len()),
+            (0, 0),
+            "a quiet refresh opens nothing"
+        );
         assert_eq!(states(&s, &main, true), want);
     }
 
@@ -414,7 +590,11 @@ mod tests {
         let mut s = Subagents::new(&main_path);
         let (spent, problems) = s.refresh(&main, true, 0);
         assert_eq!(spent, 0);
-        assert_eq!(problems.iter().filter(|p| **p == Problem::Deferred).count(), 3, "a1, c1 and c2 wait");
+        assert_eq!(
+            problems.iter().filter(|p| **p == Problem::Deferred).count(),
+            3,
+            "a1, c1 and c2 wait"
+        );
         let got = states(&s, &main, true);
         assert_eq!(got["a1"], (NodeState::Running, false));
         let (spent, problems) = s.refresh(&main, true, 1 << 20);
@@ -428,12 +608,15 @@ mod tests {
         let mut s = Subagents::new(&main_path);
         s.refresh(&main, true, 1 << 20);
         assert_eq!(states(&s, &main, true)["a1"].0, NodeState::Running);
-        let meta_path = main_path.with_extension("").join("subagents/agent-a1.meta.json");
+        let meta_path = main_path
+            .with_extension("")
+            .join("subagents/agent-a1.meta.json");
         let mut text = fs::read_to_string(&meta_path).unwrap();
         text = text.trim_end().trim_end_matches('}').to_owned() + ",\"stoppedByUser\":true}\n";
         fs::write(&meta_path, text).unwrap();
         let f = fs::OpenOptions::new().write(true).open(&meta_path).unwrap();
-        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2)).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2))
+            .unwrap();
         s.refresh(&main, true, 1 << 20);
         assert_eq!(states(&s, &main, true)["a1"], (NodeState::Killed, false));
     }
@@ -450,7 +633,10 @@ mod tests {
         assert_eq!(got["a3"].0, NodeState::Killed);
         assert_eq!(got["c1"].0, NodeState::Orphaned);
         assert_eq!(got["c2"].0, NodeState::Orphaned);
-        assert!(got.values().all(|(_, open)| !open), "no cursors for a dead session");
+        assert!(
+            got.values().all(|(_, open)| !open),
+            "no cursors for a dead session"
+        );
     }
 
     #[test]

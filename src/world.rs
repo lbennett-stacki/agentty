@@ -27,9 +27,14 @@ pub struct Roots {
 impl Roots {
     pub fn from_env() -> anyhow::Result<Roots> {
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
-        let env_config_dir =
-            std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()).map(PathBuf::from);
-        Ok(Roots { cache: home.join(".cache").join("agentically"), home, env_config_dir })
+        let env_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        Ok(Roots {
+            cache: home.join(".cache").join("agentically"),
+            home,
+            env_config_dir,
+        })
     }
 }
 
@@ -58,7 +63,8 @@ impl Host for RealHost {
             .map_err(|_| HostError)?;
         // `ps -p` exits 1 with no output at all when every listed pid is dead. That is an answer;
         // anything on stderr or another code is a failure.
-        let answered = out.status.success() || (out.status.code() == Some(1) && out.stderr.is_empty());
+        let answered =
+            out.status.success() || (out.status.code() == Some(1) && out.stderr.is_empty());
         if !answered {
             return Err(HostError);
         }
@@ -66,7 +72,10 @@ impl Host for RealHost {
     }
 
     fn panes(&mut self) -> Result<Vec<PaneInfo>, HostError> {
-        let out = Command::new("tmux").args(LIST_PANES_ARGV).output().map_err(|_| HostError)?;
+        let out = Command::new("tmux")
+            .args(LIST_PANES_ARGV)
+            .output()
+            .map_err(|_| HostError)?;
         if !out.status.success() {
             return Err(HostError);
         }
@@ -81,7 +90,10 @@ pub fn parse_panes(stdout: &str) -> Vec<PaneInfo> {
         .lines()
         .filter_map(|line| {
             let (id, pid) = line.split_once('\t')?;
-            Some(PaneInfo { id: PaneId::parse(id)?, pid: Pid(pid.trim().parse().ok()?) })
+            Some(PaneInfo {
+                id: PaneId::parse(id)?,
+                pid: Pid(pid.trim().parse().ok()?),
+            })
         })
         .collect()
 }
@@ -99,7 +111,9 @@ pub struct ReadBudget {
 
 impl Default for ReadBudget {
     fn default() -> ReadBudget {
-        ReadBudget { bytes_per_refresh: 4 << 20 }
+        ReadBudget {
+            bytes_per_refresh: 4 << 20,
+        }
     }
 }
 
@@ -107,7 +121,11 @@ type Stamp = (i64, u64);
 
 fn stamp(path: &Path) -> Option<Stamp> {
     let meta = std::fs::metadata(path).ok()?;
-    let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
     Some((mtime.as_millis() as i64, meta.len()))
 }
 
@@ -175,11 +193,15 @@ impl World {
             !tick
                 && matches!(
                     d.source,
-                    DiagSource::Transcript | DiagSource::Subagent | DiagSource::Tmux | DiagSource::Ps
+                    DiagSource::Transcript
+                        | DiagSource::Subagent
+                        | DiagSource::Tmux
+                        | DiagSource::Ps
                 )
         });
         let now = self.host.now();
-        self.dirs = registry::discover_config_dirs(&self.roots.home, self.roots.env_config_dir.as_deref());
+        self.dirs =
+            registry::discover_config_dirs(&self.roots.home, self.roots.env_config_dir.as_deref());
         self.observe_processes(tick);
         self.refresh_jobs();
         self.resolve_transcripts(now);
@@ -206,7 +228,11 @@ impl World {
     }
 
     fn note(&mut self, source: DiagSource, problem: Problem, path: String) {
-        self.diagnostics.push(Diagnostic { source, problem, path });
+        self.diagnostics.push(Diagnostic {
+            source,
+            problem,
+            path,
+        });
     }
 
     fn observe_processes(&mut self, tick: bool) {
@@ -215,7 +241,8 @@ impl World {
             let (entries, problems) = registry::scan(dir);
             candidates.extend(entries.into_iter().map(|e| (dir.clone(), e)));
             for (path, problem) in problems {
-                self.diagnostics.push(diag(&self.roots.home, DiagSource::Registry, problem, &path));
+                self.diagnostics
+                    .push(diag(&self.roots.home, DiagSource::Registry, problem, &path));
             }
         }
 
@@ -242,12 +269,14 @@ impl World {
             }
         }
         let candidate_pids: HashSet<Pid> = candidates.iter().map(|(_, r)| r.pid).collect();
-        self.proc_starts.retain(|pid, _| candidate_pids.contains(pid));
+        self.proc_starts
+            .retain(|pid, _| candidate_pids.contains(pid));
 
         self.live.clear();
         self.live_jobs.clear();
         for (dir, reg) in candidates {
-            let alive = unverified.contains(&reg.pid) || self.proc_starts.get(&reg.pid) == Some(&reg.proc_start);
+            let alive = unverified.contains(&reg.pid)
+                || self.proc_starts.get(&reg.pid) == Some(&reg.proc_start);
             if !alive {
                 continue;
             }
@@ -255,20 +284,31 @@ impl World {
                 self.live_jobs.insert((dir.clone(), job.clone()));
             }
             if !reg.hidden {
-                self.live.push(Live { dir, reg, transcript: None });
+                self.live.push(Live {
+                    dir,
+                    reg,
+                    transcript: None,
+                });
             }
         }
-        self.live.sort_by(|a, b| (&a.dir, a.reg.pid).cmp(&(&b.dir, b.reg.pid)));
+        self.live
+            .sort_by(|a, b| (&a.dir, a.reg.pid).cmp(&(&b.dir, b.reg.pid)));
     }
 
     fn refresh_jobs(&mut self) {
         let mut next = BTreeMap::new();
         for dir in &self.dirs {
-            let Ok(listing) = std::fs::read_dir(jobs::jobs_dir(dir)) else { continue };
+            let Ok(listing) = std::fs::read_dir(jobs::jobs_dir(dir)) else {
+                continue;
+            };
             for entry in listing.flatten() {
-                let Some(id) = entry.file_name().to_str().and_then(JobId::parse) else { continue };
+                let Some(id) = entry.file_name().to_str().and_then(JobId::parse) else {
+                    continue;
+                };
                 let path = entry.path().join("state.json");
-                let Some(now_stamp) = stamp(&path) else { continue };
+                let Some(now_stamp) = stamp(&path) else {
+                    continue;
+                };
                 let key = (dir.clone(), id);
                 let previous = self.jobs.remove(&key);
                 if let Some(prev) = previous.as_ref().filter(|(s, _)| *s == now_stamp) {
@@ -283,7 +323,12 @@ impl World {
                         next.insert(key, (now_stamp, job));
                     }
                     Err(problem) => {
-                        self.diagnostics.push(diag(&self.roots.home, DiagSource::Job, problem, &path));
+                        self.diagnostics.push(diag(
+                            &self.roots.home,
+                            DiagSource::Job,
+                            problem,
+                            &path,
+                        ));
                         if let Some(prev) = previous {
                             next.insert(key, prev);
                         }
@@ -309,7 +354,11 @@ impl World {
                     let key = (dir.clone(), reg.session_id.clone());
                     let path = match self.resolved.get(&key) {
                         Some(Resolution::Found(p)) if p.is_file() => Some(p.clone()),
-                        Some(Resolution::Missing { checked }) if now.millis_since(*checked) < REGLOB_MS => None,
+                        Some(Resolution::Missing { checked })
+                            if now.millis_since(*checked) < REGLOB_MS =>
+                        {
+                            None
+                        }
                         _ => {
                             let found = glob_transcript(dir, &reg.session_id);
                             let r = match &found {
@@ -331,7 +380,9 @@ impl World {
 
     fn exited_jobs(&self, now: At) -> impl Iterator<Item = (&ConfigDir, &Job)> {
         self.jobs.iter().filter_map(move |(key, (_, job))| {
-            let recent = job.ended_at.is_some_and(|e| now.millis_since(e) <= EXITED_WINDOW_MS);
+            let recent = job
+                .ended_at
+                .is_some_and(|e| now.millis_since(e) <= EXITED_WINDOW_MS);
             (recent && !self.live_jobs.contains(key)).then_some((&key.0, job))
         })
     }
@@ -341,7 +392,10 @@ impl World {
         for p in self.live.iter().filter_map(|l| l.transcript.as_ref()) {
             refs.insert(p.clone(), true);
         }
-        for p in self.exited_jobs(now).filter_map(|(_, j)| j.transcript.as_ref()) {
+        for p in self
+            .exited_jobs(now)
+            .filter_map(|(_, j)| j.transcript.as_ref())
+        {
             refs.entry(p.clone()).or_insert(false);
         }
         self.transcripts.retain(|p, _| refs.contains_key(p));
@@ -354,33 +408,59 @@ impl World {
                 Entry::Occupied(mut e) => {
                     if e.get_mut().transcript.pump().is_err() {
                         e.remove();
-                        self.diagnostics.push(diag(home, DiagSource::Transcript, Problem::Unreadable, &path));
+                        self.diagnostics.push(diag(
+                            home,
+                            DiagSource::Transcript,
+                            Problem::Unreadable,
+                            &path,
+                        ));
                         continue;
                     }
                     e.into_mut()
                 }
                 Entry::Vacant(v) => {
                     if spent >= budget {
-                        self.diagnostics.push(diag(home, DiagSource::Transcript, Problem::Deferred, &path));
+                        self.diagnostics.push(diag(
+                            home,
+                            DiagSource::Transcript,
+                            Problem::Deferred,
+                            &path,
+                        ));
                         continue;
                     }
                     match Transcript::open(path.clone(), Window::Main) {
                         Ok(transcript) => {
                             spent += transcript.window_bytes();
-                            v.insert(Tracked { subagents: Subagents::new(&path), transcript })
+                            v.insert(Tracked {
+                                subagents: Subagents::new(&path),
+                                transcript,
+                            })
                         }
                         Err(_) => {
-                            self.diagnostics.push(diag(home, DiagSource::Transcript, Problem::Unreadable, &path));
+                            self.diagnostics.push(diag(
+                                home,
+                                DiagSource::Transcript,
+                                Problem::Unreadable,
+                                &path,
+                            ));
                             continue;
                         }
                     }
                 }
             };
-            let Tracked { transcript, subagents } = tracked;
-            let (used, problems) = subagents.refresh(transcript.facts(), alive, budget.saturating_sub(spent));
+            let Tracked {
+                transcript,
+                subagents,
+            } = tracked;
+            let (used, problems) =
+                subagents.refresh(transcript.facts(), alive, budget.saturating_sub(spent));
             spent += used;
             let dir = path.with_extension("").join("subagents");
-            self.diagnostics.extend(problems.into_iter().map(|p| diag(home, DiagSource::Subagent, p, &dir)));
+            self.diagnostics.extend(
+                problems
+                    .into_iter()
+                    .map(|p| diag(home, DiagSource::Subagent, p, &dir)),
+            );
         }
     }
 
@@ -404,7 +484,12 @@ impl World {
                         match parsed {
                             Ok(t) => tasks.push(t),
                             Err(Problem::Unreadable) if !path.exists() => {}
-                            Err(p) => self.diagnostics.push(diag(&self.roots.home, DiagSource::Tasks, p, path)),
+                            Err(p) => self.diagnostics.push(diag(
+                                &self.roots.home,
+                                DiagSource::Tasks,
+                                p,
+                                path,
+                            )),
                         }
                     }
                     tasks.sort_by_key(|t| t.id);
@@ -420,7 +505,9 @@ impl World {
         let mut next = HashMap::new();
         for sid in self.live.iter().map(|l| &l.reg.session_id) {
             let path = sidecars::statusline_path(&self.roots.cache, sid);
-            let Some((mtime, _)) = stamp(&path) else { continue };
+            let Some((mtime, _)) = stamp(&path) else {
+                continue;
+            };
             match self.statusline.remove(sid) {
                 Some(s) if s.at == At(mtime) => {
                     next.insert(sid.clone(), s);
@@ -433,7 +520,12 @@ impl World {
                         Ok(s) => {
                             next.insert(sid.clone(), s);
                         }
-                        Err(p) => self.diagnostics.push(diag(&self.roots.home, DiagSource::Statusline, p, &path)),
+                        Err(p) => self.diagnostics.push(diag(
+                            &self.roots.home,
+                            DiagSource::Statusline,
+                            p,
+                            &path,
+                        )),
                     }
                 }
             }
@@ -444,9 +536,13 @@ impl World {
     fn refresh_teams(&mut self) {
         let mut next = BTreeMap::new();
         for dir in &self.dirs {
-            let Ok(listing) = std::fs::read_dir(dir.0.join("teams")) else { continue };
+            let Ok(listing) = std::fs::read_dir(dir.0.join("teams")) else {
+                continue;
+            };
             for path in listing.flatten().map(|e| e.path().join("config.json")) {
-                let Some(now_stamp) = stamp(&path) else { continue };
+                let Some(now_stamp) = stamp(&path) else {
+                    continue;
+                };
                 match self.teams.remove(&path) {
                     Some(prev) if prev.0 == now_stamp => {
                         next.insert(path, prev);
@@ -459,7 +555,12 @@ impl World {
                             Ok(team) => {
                                 next.insert(path, (now_stamp, team));
                             }
-                            Err(p) => self.diagnostics.push(diag(&self.roots.home, DiagSource::Team, p, &path)),
+                            Err(p) => self.diagnostics.push(diag(
+                                &self.roots.home,
+                                DiagSource::Team,
+                                p,
+                                &path,
+                            )),
                         }
                     }
                 }
@@ -473,11 +574,16 @@ impl World {
             .live
             .iter()
             .map(|l| l.reg.cwd.clone())
-            .chain(self.exited_jobs(now).filter_map(|(_, j)| j.worktree_path.clone()))
+            .chain(
+                self.exited_jobs(now)
+                    .filter_map(|(_, j)| j.worktree_path.clone()),
+            )
             .collect();
         self.repos.retain(|cwd, _| cwds.contains(cwd));
         for cwd in cwds {
-            self.repos.entry(cwd).or_insert_with_key(|cwd| sidecars::repo_root(cwd));
+            self.repos
+                .entry(cwd)
+                .or_insert_with_key(|cwd| sidecars::repo_root(cwd));
         }
     }
 
@@ -490,7 +596,11 @@ impl World {
     }
 
     fn view<'a>(&'a self, live: &'a Live) -> SessionView<'a> {
-        let Live { dir, reg, transcript } = live;
+        let Live {
+            dir,
+            reg,
+            transcript,
+        } = live;
         let tracked = transcript.as_ref().and_then(|p| self.transcripts.get(p));
         SessionView {
             dir,
@@ -506,7 +616,9 @@ impl World {
             team: self
                 .teams
                 .iter()
-                .find(|(path, (_, team))| path.starts_with(&dir.0) && team.lead.as_ref() == Some(&reg.session_id))
+                .find(|(path, (_, team))| {
+                    path.starts_with(&dir.0) && team.lead.as_ref() == Some(&reg.session_id)
+                })
                 .map(|(_, (_, team))| team),
             repo: self.repos.get(&reg.cwd).and_then(|r| r.as_deref()),
             panes: &self.panes,
@@ -518,7 +630,11 @@ impl World {
             .map(|(dir, job)| ExitedView {
                 dir,
                 job,
-                facts: job.transcript.as_ref().and_then(|p| self.transcripts.get(p)).map(|t| t.transcript.facts()),
+                facts: job
+                    .transcript
+                    .as_ref()
+                    .and_then(|p| self.transcripts.get(p))
+                    .map(|t| t.transcript.facts()),
             })
             .collect()
     }
@@ -526,7 +642,13 @@ impl World {
     pub fn watch_roots(&self) -> Vec<PathBuf> {
         self.dirs
             .iter()
-            .flat_map(|d| [registry::sessions_dir(d), jobs::jobs_dir(d), sidecars::tasks_root(d)])
+            .flat_map(|d| {
+                [
+                    registry::sessions_dir(d),
+                    jobs::jobs_dir(d),
+                    sidecars::tasks_root(d),
+                ]
+            })
             .chain([sidecars::statusline_dir(&self.roots.cache)])
             .filter(|p| p.is_dir())
             .collect()
@@ -542,7 +664,11 @@ fn diag(home: &Path, source: DiagSource, problem: Problem, path: &Path) -> Diagn
         Ok(rest) => format!("~/{}", rest.display()),
         Err(_) => path.display().to_string(),
     };
-    Diagnostic { source, problem, path }
+    Diagnostic {
+        source,
+        problem,
+        path,
+    }
 }
 
 fn glob_transcript(dir: &ConfigDir, sid: &SessionId) -> Option<PathBuf> {
@@ -557,11 +683,18 @@ fn glob_transcript(dir: &ConfigDir, sid: &SessionId) -> Option<PathBuf> {
 }
 
 fn task_files(dir: &Path) -> Vec<(PathBuf, Stamp)> {
-    let Ok(listing) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(listing) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut files: Vec<(u32, PathBuf, Stamp)> = listing
         .flatten()
         .filter_map(|e| {
-            let n: u32 = e.file_name().to_str()?.strip_suffix(".json")?.parse().ok()?;
+            let n: u32 = e
+                .file_name()
+                .to_str()?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()?;
             let path = e.path();
             let s = stamp(&path)?;
             Some((n, path, s))
@@ -603,7 +736,10 @@ pub(crate) mod tests {
             if s.ps_fails {
                 return Err(HostError);
             }
-            Ok(pids.iter().filter_map(|p| Some((*p, s.procs.get(p)?.clone()))).collect())
+            Ok(pids
+                .iter()
+                .filter_map(|p| Some((*p, s.procs.get(p)?.clone())))
+                .collect())
         }
         fn panes(&mut self) -> Result<Vec<PaneInfo>, HostError> {
             self.0.borrow().panes.clone().ok_or(HostError)
@@ -626,13 +762,21 @@ pub(crate) mod tests {
         fn new(name: &str) -> Fixture {
             let home = Scratch::new(name);
             home.mkdir(".claude/sessions");
-            let host = Rc::new(RefCell::new(HostState { now: iso(NOW), panes: Some(Vec::new()), ..HostState::default() }));
+            let host = Rc::new(RefCell::new(HostState {
+                now: iso(NOW),
+                panes: Some(Vec::new()),
+                ..HostState::default()
+            }));
             let roots = Roots {
                 home: home.path().to_path_buf(),
                 env_config_dir: None,
                 cache: home.path().join(".cache/agentically"),
             };
-            let world = World::new(roots, Box::new(FakeHost(host.clone())), ReadBudget::default());
+            let world = World::new(
+                roots,
+                Box::new(FakeHost(host.clone())),
+                ReadBudget::default(),
+            );
             Fixture { home, host, world }
         }
 
@@ -642,25 +786,42 @@ pub(crate) mod tests {
                 "kind": "interactive", "entrypoint": "cli", "status": "idle",
                 "statusUpdatedAt": 1, "cwd": "/nowhere",
             });
-            record.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-            self.home.write(&format!("{dir}/sessions/{pid}.json"), record.to_string().as_bytes());
+            record
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            self.home.write(
+                &format!("{dir}/sessions/{pid}.json"),
+                record.to_string().as_bytes(),
+            );
         }
 
         fn alive(&self, pid: u32) {
-            self.host.borrow_mut().procs.insert(Pid(pid), ProcStart::new(&format!("start-{pid}  ")));
+            self.host
+                .borrow_mut()
+                .procs
+                .insert(Pid(pid), ProcStart::new(&format!("start-{pid}  ")));
         }
 
         fn job(&self, dir: &str, id: &str, json: &str) {
-            self.home.write(&format!("{dir}/jobs/{id}/state.json"), json.as_bytes());
+            self.home
+                .write(&format!("{dir}/jobs/{id}/state.json"), json.as_bytes());
         }
 
         fn pids(&self) -> Vec<(String, u32)> {
-            self.world.sessions().map(|v| (v.dir.short().to_owned(), v.reg.pid.0)).collect()
+            self.world
+                .sessions()
+                .map(|v| (v.dir.short().to_owned(), v.reg.pid.0))
+                .collect()
         }
 
         fn exited_ids(&self) -> Vec<String> {
             let now = self.world.now();
-            self.world.exited(now).iter().map(|e| e.job.id.0.clone()).collect()
+            self.world
+                .exited(now)
+                .iter()
+                .map(|e| e.job.id.0.clone())
+                .collect()
         }
     }
 
@@ -668,9 +829,18 @@ pub(crate) mod tests {
     fn spare_and_parked_records_are_hidden_but_keep_their_jobs_live() {
         let f = Fixture::new("world-hidden");
         f.session(".claude", 10, "s-10", json!({}));
-        f.session(".claude", 11, "s-11", json!({"kind": "bg", "jobId": "aaaa0001", "spare": true}));
+        f.session(
+            ".claude",
+            11,
+            "s-11",
+            json!({"kind": "bg", "jobId": "aaaa0001", "spare": true}),
+        );
         f.session(".claude", 12, "s-12", json!({"parkedJobId": "bbbb0002"}));
-        f.job(".claude", "bbbb0002", r#"{"state":"done","lastTerminalAt":"2026-10-04T11:00:00Z"}"#);
+        f.job(
+            ".claude",
+            "bbbb0002",
+            r#"{"state":"done","lastTerminalAt":"2026-10-04T11:00:00Z"}"#,
+        );
         for pid in [10, 11, 12] {
             f.alive(pid);
         }
@@ -678,7 +848,11 @@ pub(crate) mod tests {
         f.world.refresh(Wake::Tick);
         assert_eq!(f.pids(), [("".to_owned(), 10)]);
         assert!(f.exited_ids().is_empty());
-        assert!(f.world.diagnostics().is_empty(), "{:?}", f.world.diagnostics());
+        assert!(
+            f.world.diagnostics().is_empty(),
+            "{:?}",
+            f.world.diagnostics()
+        );
     }
 
     #[test]
@@ -688,7 +862,10 @@ pub(crate) mod tests {
         f.session(".claude", 21, "s-21", json!({}));
         f.session(".claude", 22, "s-22", json!({}));
         f.alive(22);
-        f.host.borrow_mut().procs.insert(Pid(21), ProcStart::new("Mon Oct  5 09:00:00 2026"));
+        f.host
+            .borrow_mut()
+            .procs
+            .insert(Pid(21), ProcStart::new("Mon Oct  5 09:00:00 2026"));
         f.world.refresh(Wake::Tick);
         assert_eq!(f.pids(), [("".to_owned(), 22)]);
         assert!(f.world.diagnostics().is_empty());
@@ -699,16 +876,36 @@ pub(crate) mod tests {
         let mut f = Fixture::new("world-clear");
         f.session(".claude", 30, "old-sid", json!({}));
         f.alive(30);
-        f.home.write(".claude/projects/-work-demo/old-sid.jsonl", b"");
+        f.home
+            .write(".claude/projects/-work-demo/old-sid.jsonl", b"");
         f.world.refresh(Wake::Doorbell);
-        assert_eq!(f.world.live[0].transcript, Some(f.home.path().join(".claude/projects/-work-demo/old-sid.jsonl")));
+        assert_eq!(
+            f.world.live[0].transcript,
+            Some(
+                f.home
+                    .path()
+                    .join(".claude/projects/-work-demo/old-sid.jsonl")
+            )
+        );
 
         f.session(".claude", 30, "new-sid", json!({}));
-        f.home.write(".claude/projects/-work-other/new-sid.jsonl", b"");
+        f.home
+            .write(".claude/projects/-work-other/new-sid.jsonl", b"");
         f.world.refresh(Wake::Doorbell);
-        let rows: Vec<_> = f.world.sessions().map(|v| (v.reg.pid, v.reg.session_id.0.clone())).collect();
+        let rows: Vec<_> = f
+            .world
+            .sessions()
+            .map(|v| (v.reg.pid, v.reg.session_id.0.clone()))
+            .collect();
         assert_eq!(rows, [(Pid(30), "new-sid".to_owned())]);
-        assert_eq!(f.world.live[0].transcript, Some(f.home.path().join(".claude/projects/-work-other/new-sid.jsonl")));
+        assert_eq!(
+            f.world.live[0].transcript,
+            Some(
+                f.home
+                    .path()
+                    .join(".claude/projects/-work-other/new-sid.jsonl")
+            )
+        );
         assert_eq!(f.host.borrow().ps_calls, [vec![Pid(30)]]);
     }
 
@@ -725,21 +922,36 @@ pub(crate) mod tests {
         assert_eq!(f.world.live[0].transcript, None);
         f.host.borrow_mut().now += 1;
         f.world.refresh(Wake::Doorbell);
-        assert_eq!(f.world.live[0].transcript, Some(f.home.path().join(".claude/projects/-p/late.jsonl")));
+        assert_eq!(
+            f.world.live[0].transcript,
+            Some(f.home.path().join(".claude/projects/-p/late.jsonl"))
+        );
     }
 
     #[test]
     fn bg_transcript_comes_from_link_scan_path() {
         let mut f = Fixture::new("world-link");
-        f.session(".claude", 32, "bg-sid", json!({"kind": "bg", "jobId": "cafe0001"}));
+        f.session(
+            ".claude",
+            32,
+            "bg-sid",
+            json!({"kind": "bg", "jobId": "cafe0001"}),
+        );
         f.alive(32);
-        f.job(".claude", "cafe0001", r#"{"state":"working","linkScanPath":"/exact/path.jsonl"}"#);
+        f.job(
+            ".claude",
+            "cafe0001",
+            r#"{"state":"working","linkScanPath":"/exact/path.jsonl"}"#,
+        );
         f.home.write(".claude/projects/-p/bg-sid.jsonl", b"");
         f.world.refresh(Wake::Doorbell);
         let view = f.world.sessions().next().unwrap();
         assert_eq!(view.reg.kind, ProcKind::Bg);
         assert_eq!(view.job.map(|j| j.id.0.as_str()), Some("cafe0001"));
-        assert_eq!(f.world.live[0].transcript, Some(PathBuf::from("/exact/path.jsonl")));
+        assert_eq!(
+            f.world.live[0].transcript,
+            Some(PathBuf::from("/exact/path.jsonl"))
+        );
     }
 
     #[test]
@@ -756,20 +968,50 @@ pub(crate) mod tests {
         let h = f.home.path();
         assert_eq!(
             f.world.watch_roots(),
-            [h.join(".claude/sessions"), h.join(".claude-personal/sessions"), h.join(".claude-personal/jobs")]
+            [
+                h.join(".claude/sessions"),
+                h.join(".claude-personal/sessions"),
+                h.join(".claude-personal/jobs")
+            ]
         );
     }
 
     #[test]
     fn exited_jobs_are_shown_for_24h_after_their_process_retires() {
         let mut f = Fixture::new("world-exited");
-        f.job(".claude", "c0000001", r#"{"state":"done","lastTerminalAt":"2026-10-04T11:00:00Z"}"#);
-        f.job(".claude", "c0000002", r#"{"state":"done","lastTerminalAt":"2026-10-03T11:59:00Z"}"#);
-        f.job(".claude", "c0000003", r#"{"state":"done","lastTerminalAt":"2026-10-04T11:30:00Z"}"#);
-        f.session(".claude", 50, "s-50", json!({"kind": "bg", "jobId": "c0000003"}));
+        f.job(
+            ".claude",
+            "c0000001",
+            r#"{"state":"done","lastTerminalAt":"2026-10-04T11:00:00Z"}"#,
+        );
+        f.job(
+            ".claude",
+            "c0000002",
+            r#"{"state":"done","lastTerminalAt":"2026-10-03T11:59:00Z"}"#,
+        );
+        f.job(
+            ".claude",
+            "c0000003",
+            r#"{"state":"done","lastTerminalAt":"2026-10-04T11:30:00Z"}"#,
+        );
+        f.session(
+            ".claude",
+            50,
+            "s-50",
+            json!({"kind": "bg", "jobId": "c0000003"}),
+        );
         f.alive(50);
-        f.job(".claude", "c0000004", r#"{"state":"working","updatedAt":"2026-10-04T10:00:00Z"}"#);
-        f.session(".claude", 51, "s-51", json!({"kind": "bg", "jobId": "c0000004"}));
+        f.job(
+            ".claude",
+            "c0000004",
+            r#"{"state":"working","updatedAt":"2026-10-04T10:00:00Z"}"#,
+        );
+        f.session(
+            ".claude",
+            51,
+            "s-51",
+            json!({"kind": "bg", "jobId": "c0000004"}),
+        );
         f.home.write(".claude/jobs/pins.json", b"{}");
         f.home.mkdir(".claude/jobs/spare001");
         f.world.refresh(Wake::Tick);
@@ -789,7 +1031,11 @@ pub(crate) mod tests {
         f.host.borrow_mut().ps_fails = true;
         f.world.refresh(Wake::Tick);
         assert_eq!(f.pids(), [("".to_owned(), 60), ("".to_owned(), 61)]);
-        let ps = Diagnostic { source: DiagSource::Ps, problem: Problem::Unavailable, path: "ps".into() };
+        let ps = Diagnostic {
+            source: DiagSource::Ps,
+            problem: Problem::Unavailable,
+            path: "ps".into(),
+        };
         assert_eq!(f.world.diagnostics(), [ps.clone()]);
 
         f.home.remove(".claude/sessions/61.json");
@@ -807,7 +1053,10 @@ pub(crate) mod tests {
         let mut f = Fixture::new("world-tmux");
         f.session(".claude", 70, "s-70", json!({"tmux": "0:@1.%9"}));
         f.alive(70);
-        let pane = PaneInfo { id: PaneId::parse("%9").unwrap(), pid: Pid(69) };
+        let pane = PaneInfo {
+            id: PaneId::parse("%9").unwrap(),
+            pid: Pid(69),
+        };
         f.host.borrow_mut().panes = Some(vec![pane.clone()]);
         f.world.refresh(Wake::Tick);
         assert_eq!(f.world.sessions().next().unwrap().panes, [pane]);
@@ -823,8 +1072,14 @@ pub(crate) mod tests {
         let mut f = Fixture::new("world-sidecars");
         f.session(".claude", 80, "s-80", json!({}));
         f.alive(80);
-        f.home.write(".claude/tasks/s-80/2.json", br#"{"id":"2","subject":"Second","status":"pending"}"#);
-        f.home.write(".claude/tasks/s-80/1.json", br#"{"id":"1","subject":"First","status":"in_progress"}"#);
+        f.home.write(
+            ".claude/tasks/s-80/2.json",
+            br#"{"id":"2","subject":"Second","status":"pending"}"#,
+        );
+        f.home.write(
+            ".claude/tasks/s-80/1.json",
+            br#"{"id":"1","subject":"First","status":"in_progress"}"#,
+        );
         f.home.write(".claude/tasks/s-80/.lock", b"");
         f.home.write(".claude/tasks/s-80/1.json.lock", b"");
         f.home.write(".cache/agentically/statusline/s-80.json", br#"{"context_window":{"used_percentage":42.5,"context_window_size":1000000},"cost":{"total_cost_usd":1.25}}"#);
@@ -834,10 +1089,16 @@ pub(crate) mod tests {
             let subjects: Vec<_> = v.tasks.iter().map(|t| t.subject.as_str()).collect();
             assert_eq!(subjects, ["First", "Second"]);
             let sl = v.statusline.unwrap();
-            assert_eq!((sl.ctx_used_pct, sl.window, sl.cost_usd), (Some(42.5), Some(1_000_000), Some(1.25)));
+            assert_eq!(
+                (sl.ctx_used_pct, sl.window, sl.cost_usd),
+                (Some(42.5), Some(1_000_000), Some(1.25))
+            );
         }
 
-        f.home.write(".claude/tasks/s-80/2.json", br#"{"id":"2","subject":"Second","status":"completed"}"#);
+        f.home.write(
+            ".claude/tasks/s-80/2.json",
+            br#"{"id":"2","subject":"Second","status":"completed"}"#,
+        );
         f.world.refresh(Wake::Doorbell);
         let status = f.world.sessions().next().unwrap().tasks[1].status.clone();
         assert_eq!(status, sidecars::TaskStatus::Completed);
@@ -850,7 +1111,11 @@ pub(crate) mod tests {
         f.home.remove(".claude/sessions/80.json");
         f.world.refresh(Wake::Doorbell);
         assert_eq!(f.world.sessions().count(), 0);
-        assert!(f.world.tasks.is_empty() && f.world.statusline.is_empty() && f.world.resolved.is_empty());
+        assert!(
+            f.world.tasks.is_empty()
+                && f.world.statusline.is_empty()
+                && f.world.resolved.is_empty()
+        );
     }
 
     #[test]
@@ -869,22 +1134,47 @@ pub(crate) mod tests {
         f.world.refresh(Wake::Doorbell);
         let v = f.world.sessions().next().unwrap();
         assert_eq!(v.team.map(|t| t.name.as_str()), Some("session-lead"));
-        assert_eq!(v.repo, Some(std::fs::canonicalize(&repo).unwrap().as_path()));
+        assert_eq!(
+            v.repo,
+            Some(std::fs::canonicalize(&repo).unwrap().as_path())
+        );
     }
 
     #[test]
     fn unparsable_job_keeps_last_good_parse_and_is_reported() {
         let mut f = Fixture::new("world-badjob");
-        f.session(".claude", 95, "s-95", json!({"kind": "bg", "jobId": "dead0001"}));
+        f.session(
+            ".claude",
+            95,
+            "s-95",
+            json!({"kind": "bg", "jobId": "dead0001"}),
+        );
         f.alive(95);
-        f.job(".claude", "dead0001", r#"{"state":"working","name":"keep me"}"#);
+        f.job(
+            ".claude",
+            "dead0001",
+            r#"{"state":"working","name":"keep me"}"#,
+        );
         f.world.refresh(Wake::Doorbell);
         f.job(".claude", "dead0001", r#"{"state":"work"#);
         f.world.refresh(Wake::Doorbell);
-        let name = f.world.sessions().next().unwrap().job.and_then(|j| j.name.clone());
+        let name = f
+            .world
+            .sessions()
+            .next()
+            .unwrap()
+            .job
+            .and_then(|j| j.name.clone());
         assert_eq!(name.as_deref(), Some("keep me"));
         let d = &f.world.diagnostics()[0];
-        assert_eq!((d.source, &d.problem, d.path.as_str()), (DiagSource::Job, &Problem::Unparsable, "~/.claude/jobs/dead0001/state.json"));
+        assert_eq!(
+            (d.source, &d.problem, d.path.as_str()),
+            (
+                DiagSource::Job,
+                &Problem::Unparsable,
+                "~/.claude/jobs/dead0001/state.json"
+            )
+        );
     }
 
     #[test]
@@ -894,39 +1184,68 @@ pub(crate) mod tests {
         for (pid, sid) in [(100, "big-a"), (101, "big-b")] {
             f.session(".claude", pid, sid, json!({"status": "busy"}));
             f.alive(pid);
-            f.home.write(&format!(".claude/projects/-p/{sid}.jsonl"), filler.as_bytes());
+            f.home.write(
+                &format!(".claude/projects/-p/{sid}.jsonl"),
+                filler.as_bytes(),
+            );
         }
         f.world.refresh(Wake::Tick);
         let opened = |f: &Fixture| f.world.sessions().filter(|v| v.facts.is_some()).count();
         assert_eq!(opened(&f), 1);
-        let deferred: Vec<_> = f.world.diagnostics().iter().filter(|d| d.problem == Problem::Deferred).collect();
+        let deferred: Vec<_> = f
+            .world
+            .diagnostics()
+            .iter()
+            .filter(|d| d.problem == Problem::Deferred)
+            .collect();
         assert_eq!(deferred.len(), 1);
         assert_eq!(deferred[0].path, "~/.claude/projects/-p/big-b.jsonl");
 
         f.world.refresh(Wake::Tick);
         assert_eq!(opened(&f), 2);
-        assert!(f.world.diagnostics().is_empty(), "{:?}", f.world.diagnostics());
+        assert!(
+            f.world.diagnostics().is_empty(),
+            "{:?}",
+            f.world.diagnostics()
+        );
 
         f.home.remove(".claude/sessions/100.json");
         f.world.refresh(Wake::Doorbell);
         assert_eq!(f.world.transcripts.len(), 2);
         f.world.refresh(Wake::Tick);
-        assert_eq!(f.world.transcripts.keys().collect::<Vec<_>>(), [&f.home.path().join(".claude/projects/-p/big-b.jsonl")]);
+        assert_eq!(
+            f.world.transcripts.keys().collect::<Vec<_>>(),
+            [&f.home.path().join(".claude/projects/-p/big-b.jsonl")]
+        );
     }
 
     #[test]
     #[ignore = "reads the real ~/.claude*; run with --ignored --nocapture"]
     fn real_data_probe() {
-        let mut world = World::new(Roots::from_env().unwrap(), Box::new(RealHost), ReadBudget::default());
+        let mut world = World::new(
+            Roots::from_env().unwrap(),
+            Box::new(RealHost),
+            ReadBudget::default(),
+        );
         world.refresh(Wake::Doorbell);
         let panes = RealHost.panes().unwrap_or_default();
         for dir in &world.dirs {
             let (entries, problems) = registry::scan(dir);
             let jobs = world.jobs.keys().filter(|(d, _)| d == dir).count();
-            println!("dir {:?}: {} records, {} unparsed, {} jobs", dir.short(), entries.len(), problems.len(), jobs);
+            println!(
+                "dir {:?}: {} records, {} unparsed, {} jobs",
+                dir.short(),
+                entries.len(),
+                problems.len(),
+                jobs
+            );
         }
         for v in world.sessions() {
-            let in_snapshot = v.reg.pane.as_ref().is_some_and(|p| panes.iter().any(|q| &q.id == p));
+            let in_snapshot = v
+                .reg
+                .pane
+                .as_ref()
+                .is_some_and(|p| panes.iter().any(|q| &q.id == p));
             println!(
                 "live dir={:?} pid={} kind={:?} status={:?} job={} job_parsed={} pane={} pane_in_tmux={} transcript={}",
                 v.dir.short(),
@@ -937,12 +1256,20 @@ pub(crate) mod tests {
                 v.job.is_some(),
                 v.reg.pane.is_some(),
                 in_snapshot,
-                world.live.iter().any(|l| l.reg.pid == v.reg.pid && l.transcript.is_some()),
+                world
+                    .live
+                    .iter()
+                    .any(|l| l.reg.pid == v.reg.pid && l.transcript.is_some()),
             );
         }
         let now = world.now();
         for e in world.exited(now) {
-            println!("exited dir={:?} state={:?} hours_ago={}", e.dir.short(), e.job.state, now.millis_since(e.job.ended_at.unwrap()) / 3_600_000);
+            println!(
+                "exited dir={:?} state={:?} hours_ago={}",
+                e.dir.short(),
+                e.job.state,
+                now.millis_since(e.job.ended_at.unwrap()) / 3_600_000
+            );
         }
         for d in world.diagnostics() {
             println!("diagnostic {:?} {:?}", d.source, d.problem);
@@ -952,6 +1279,12 @@ pub(crate) mod tests {
     #[test]
     fn list_panes_output_parses_leniently() {
         let panes = parse_panes("%254\t5431\n%250\t85078\nbogus\n%x\t1\n\n");
-        assert_eq!(panes.iter().map(|p| (p.id.as_str(), p.pid.0)).collect::<Vec<_>>(), [("%254", 5431), ("%250", 85078)]);
+        assert_eq!(
+            panes
+                .iter()
+                .map(|p| (p.id.as_str(), p.pid.0))
+                .collect::<Vec<_>>(),
+            [("%254", 5431), ("%250", 85078)]
+        );
     }
 }

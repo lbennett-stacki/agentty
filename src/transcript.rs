@@ -25,7 +25,11 @@ impl FileStamp {
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_millis() as i64);
-        Ok(FileStamp { ino: m.ino(), len: m.len(), mtime_ms })
+        Ok(FileStamp {
+            ino: m.ino(),
+            len: m.len(),
+            mtime_ms,
+        })
     }
 }
 
@@ -65,8 +69,19 @@ impl Transcript {
         let stamp = FileStamp::of(&path)?;
         let mut file = File::open(&path)?;
         let (start, bytes) = window_start(&mut file, stamp.len, window)?;
-        let facts = if start == 0 { Facts::from_start() } else { Facts::default() };
-        let mut t = Transcript { path, stamp, offset: start, partial: Vec::new(), window, facts };
+        let facts = if start == 0 {
+            Facts::from_start()
+        } else {
+            Facts::default()
+        };
+        let mut t = Transcript {
+            path,
+            stamp,
+            offset: start,
+            partial: Vec::new(),
+            window,
+            facts,
+        };
         t.fold(&bytes);
         t.offset = start + bytes.len() as u64;
         Ok(t)
@@ -195,9 +210,16 @@ pub struct Horizon {
 pub enum Turn {
     #[default]
     Unknown,
-    Open { since: At },
-    Closed { at: At, pending_agents: u16 },
-    Interrupted { at: At },
+    Open {
+        since: At,
+    },
+    Closed {
+        at: At,
+        pending_agents: u16,
+    },
+    Interrupted {
+        at: At,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -274,7 +296,13 @@ const FILE_HISTORY_PREFIX: &[u8] = b"{\"type\":\"file-history-";
 
 impl Facts {
     pub fn from_start() -> Facts {
-        Facts { horizon: Horizon { from_start: true, first_at: None }, ..Facts::default() }
+        Facts {
+            horizon: Horizon {
+                from_start: true,
+                first_at: None,
+            },
+            ..Facts::default()
+        }
     }
 
     pub fn apply_line(&mut self, line: &[u8]) {
@@ -304,17 +332,44 @@ impl Facts {
             Event::Branch(b) => self.branch = Some(b),
             Event::TurnOpened { at } => self.turn = Turn::Open { since: at },
             Event::Interrupted { at } => self.turn = Turn::Interrupted { at },
-            Event::TurnClosed { at, pending_agents } => self.turn = Turn::Closed { at, pending_agents },
-            Event::Text { at, first_line, is_question } => {
+            Event::TurnClosed { at, pending_agents } => {
+                self.turn = Turn::Closed { at, pending_agents }
+            }
+            Event::Text {
+                at,
+                first_line,
+                is_question,
+            } => {
                 self.infer_open(at);
-                self.last_text = Some(TextBlock { first_line, at, is_question });
+                self.last_text = Some(TextBlock {
+                    first_line,
+                    at,
+                    is_question,
+                });
                 self.tail_looks_finished = true;
             }
-            Event::ToolUse { at, id, name, summary } => {
+            Event::ToolUse {
+                at,
+                id,
+                name,
+                summary,
+            } => {
                 self.infer_open(at);
-                self.pending_tools
-                    .insert(id.clone(), PendingTool { name: name.clone(), summary: summary.clone(), at });
-                self.last_tool = Some(ToolCall { id, name, summary, at, answered: false });
+                self.pending_tools.insert(
+                    id.clone(),
+                    PendingTool {
+                        name: name.clone(),
+                        summary: summary.clone(),
+                        at,
+                    },
+                );
+                self.last_tool = Some(ToolCall {
+                    id,
+                    name,
+                    summary,
+                    at,
+                    answered: false,
+                });
                 self.tail_looks_finished = false;
             }
             Event::ToolResult { at, id, signal } => {
@@ -325,8 +380,9 @@ impl Facts {
                     t.answered = true;
                 }
                 let pending = self.pending_tools.remove(&id);
-                self.tail_looks_finished =
-                    pending.as_ref().is_some_and(|p| p.name == "SubagentHandback");
+                self.tail_looks_finished = pending
+                    .as_ref()
+                    .is_some_and(|p| p.name == "SubagentHandback");
                 self.apply_signal(at, id, pending, signal);
             }
             Event::Notified { at, tasks } => {
@@ -346,10 +402,26 @@ impl Facts {
                     .collect();
                 for a in agents {
                     self.open_bg.remove(&a);
-                    self.notices.insert(a, Notice { at, outcome: Some(TaskOutcome::Killed) });
+                    self.notices.insert(
+                        a,
+                        Notice {
+                            at,
+                            outcome: Some(TaskOutcome::Killed),
+                        },
+                    );
                 }
             }
-            Event::Usage { ctx_tokens, model, at } => self.usage = Some(Usage { ctx_tokens, model, at }),
+            Event::Usage {
+                ctx_tokens,
+                model,
+                at,
+            } => {
+                self.usage = Some(Usage {
+                    ctx_tokens,
+                    model,
+                    at,
+                })
+            }
             Event::WakeupFired => self.wakeup = None,
             Event::CustomTitle(t) => self.titles.custom = Some(SafeText::redact(&t)),
             Event::AgentName(t) => self.titles.agent_name = Some(SafeText::redact(&t)),
@@ -381,7 +453,13 @@ impl Facts {
         }
     }
 
-    fn apply_signal(&mut self, at: At, id: ToolUseId, pending: Option<PendingTool>, s: WireToolResult) {
+    fn apply_signal(
+        &mut self,
+        at: At,
+        id: ToolUseId,
+        pending: Option<PendingTool>,
+        s: WireToolResult,
+    ) {
         let name = pending.as_ref().map_or("", |p| p.name.as_str());
         let launch = if let Some(b) = s.background_task_id {
             Some((b, BgKind::Shell))
@@ -394,13 +472,27 @@ impl Facts {
         };
         if let Some((task, kind)) = launch {
             let (label, started) = pending.map_or((SafeText::default(), at), |p| (p.summary, p.at));
-            self.open_bg.insert(TaskId(task), BgItem { kind, label, started, tool_use: Some(id) });
+            self.open_bg.insert(
+                TaskId(task),
+                BgItem {
+                    kind,
+                    label,
+                    started,
+                    tool_use: Some(id),
+                },
+            );
             return;
         }
         if let Some(t) = s.stopped_task_id {
             let t = TaskId(t);
             self.open_bg.remove(&t);
-            self.notices.insert(t, Notice { at, outcome: Some(TaskOutcome::Stopped) });
+            self.notices.insert(
+                t,
+                Notice {
+                    at,
+                    outcome: Some(TaskOutcome::Stopped),
+                },
+            );
         }
         if let Some(a) = s.resumed_agent_id {
             self.open_bg.entry(TaskId(a)).or_insert(BgItem {
@@ -451,7 +543,9 @@ struct WireLine {
     bridge_session_id: Option<String>,
 }
 
-fn present<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
+fn present<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<T>>, D::Error> {
     Option::<T>::deserialize(d).map(Some)
 }
 
@@ -568,16 +662,47 @@ struct WireToolResult {
 
 #[derive(Debug, PartialEq)]
 enum Event {
-    Seen { at: At },
-    TurnOpened { at: At },
-    Interrupted { at: At },
-    TurnClosed { at: At, pending_agents: u16 },
-    Text { at: At, first_line: SafeText, is_question: bool },
-    ToolUse { at: At, id: ToolUseId, name: String, summary: SafeText },
-    ToolResult { at: At, id: ToolUseId, signal: WireToolResult },
-    Notified { at: At, tasks: Vec<(TaskId, Option<TaskOutcome>)> },
-    AgentsKilled { at: At },
-    Usage { ctx_tokens: u64, model: String, at: At },
+    Seen {
+        at: At,
+    },
+    TurnOpened {
+        at: At,
+    },
+    Interrupted {
+        at: At,
+    },
+    TurnClosed {
+        at: At,
+        pending_agents: u16,
+    },
+    Text {
+        at: At,
+        first_line: SafeText,
+        is_question: bool,
+    },
+    ToolUse {
+        at: At,
+        id: ToolUseId,
+        name: String,
+        summary: SafeText,
+    },
+    ToolResult {
+        at: At,
+        id: ToolUseId,
+        signal: WireToolResult,
+    },
+    Notified {
+        at: At,
+        tasks: Vec<(TaskId, Option<TaskOutcome>)>,
+    },
+    AgentsKilled {
+        at: At,
+    },
+    Usage {
+        ctx_tokens: u64,
+        model: String,
+        at: At,
+    },
     WakeupFired,
     Branch(String),
     CustomTitle(String),
@@ -611,10 +736,16 @@ const IGNORED_TYPES: &[&str] = &[
 
 fn events(line: &[u8], out: &mut Vec<Event>) -> Result<(), Reject> {
     let w: WireLine = serde_json::from_slice(line).map_err(|_| Reject::Unparsable)?;
-    let Some(ty) = w.ty.as_deref() else { return Err(Reject::Unknown) };
+    let Some(ty) = w.ty.as_deref() else {
+        return Err(Reject::Unknown);
+    };
     match ty {
         "user" | "assistant" | "system" | "attachment" => {
-            let at = w.timestamp.as_deref().and_then(At::parse_iso).ok_or(Reject::Unparsable)?;
+            let at = w
+                .timestamp
+                .as_deref()
+                .and_then(At::parse_iso)
+                .ok_or(Reject::Unparsable)?;
             out.push(Event::Seen { at });
             if let Some(b) = w.git_branch.clone() {
                 out.push(Event::Branch(b));
@@ -644,9 +775,15 @@ fn events(line: &[u8], out: &mut Vec<Event>) -> Result<(), Reject> {
         "pr-link" => out.extend(w.pr_number.map(Event::PrLink)),
         "cost-state" => out.extend(w.total_cost_usd.map(Event::CostState)),
         "bridge-session" => {
-            out.push(Event::Bridge(w.bridge_session_id.as_deref().is_some_and(|s| !s.is_empty())));
+            out.push(Event::Bridge(
+                w.bridge_session_id
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty()),
+            ));
         }
-        t if IGNORED_TYPES.contains(&t) || t.starts_with("file-history-") || t.starts_with("artifact-") => {}
+        t if IGNORED_TYPES.contains(&t)
+            || t.starts_with("file-history-")
+            || t.starts_with("artifact-") => {}
         _ => return Err(Reject::Unknown),
     }
     Ok(())
@@ -669,7 +806,11 @@ fn user_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
         };
         for r in results {
             if let Some(id) = &r.tool_use_id {
-                out.push(Event::ToolResult { at, id: ToolUseId(id.clone()), signal: signal.clone() });
+                out.push(Event::ToolResult {
+                    at,
+                    id: ToolUseId(id.clone()),
+                    signal: signal.clone(),
+                });
             }
         }
         return;
@@ -677,7 +818,10 @@ fn user_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
     let text = content.map(WireContent::text).unwrap_or_default();
     let kind = w.origin.as_ref().and_then(|o| o.kind.as_deref());
     if kind == Some("task-notification") {
-        out.push(Event::Notified { at, tasks: parse_task_notification(&text) });
+        out.push(Event::Notified {
+            at,
+            tasks: parse_task_notification(&text),
+        });
     }
     if text.contains(INTERRUPT_MARK) {
         out.push(Event::Interrupted { at });
@@ -691,11 +835,21 @@ fn assistant_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
     if let Some(u) = &m.usage {
         let model = m.model.clone().unwrap_or_default();
         if model != "<synthetic>" {
-            let ctx_tokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
-            out.push(Event::Usage { ctx_tokens, model, at });
+            let ctx_tokens =
+                u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
+            out.push(Event::Usage {
+                ctx_tokens,
+                model,
+                at,
+            });
         }
     }
-    for b in m.content.as_ref().map(WireContent::blocks).unwrap_or_default() {
+    for b in m
+        .content
+        .as_ref()
+        .map(WireContent::blocks)
+        .unwrap_or_default()
+    {
         match b.ty.as_deref() {
             Some("tool_use") => {
                 if let Some(id) = &b.id {
@@ -703,7 +857,9 @@ fn assistant_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
                         at,
                         id: ToolUseId(id.clone()),
                         name: b.name.clone().unwrap_or_default(),
-                        summary: tool_summary(b.input.as_ref().unwrap_or(&WireToolInput::default())),
+                        summary: tool_summary(
+                            b.input.as_ref().unwrap_or(&WireToolInput::default()),
+                        ),
                     });
                 }
             }
@@ -746,7 +902,10 @@ fn attachment_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
         && a.command_mode.as_deref() == Some("task-notification")
         && let Some(prompt) = &a.prompt
     {
-        out.push(Event::Notified { at, tasks: parse_task_notification(&prompt.text()) });
+        out.push(Event::Notified {
+            at,
+            tasks: parse_task_notification(&prompt.text()),
+        });
     }
 }
 
@@ -762,7 +921,9 @@ fn parse_task_notification(xml: &str) -> Vec<(TaskId, Option<TaskOutcome>)> {
             Some("killed") => Some(TaskOutcome::Killed),
             Some("stopped") => Some(TaskOutcome::Stopped),
             Some(_) => Some(TaskOutcome::Completed),
-            None if event.trim_start().starts_with("[Monitor expired") || summary.contains("stream ended") => {
+            None if event.trim_start().starts_with("[Monitor expired")
+                || summary.contains("stream ended") =>
+            {
                 Some(TaskOutcome::Completed)
             }
             None => None,
@@ -792,13 +953,22 @@ fn tag<'a>(s: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn tool_summary(input: &WireToolInput) -> SafeText {
-    let basename = input.file_path.as_deref().map(|p| p.rsplit('/').next().unwrap_or(p));
-    let raw = input.description.as_deref().or(basename).or(input.pattern.as_deref()).unwrap_or("");
+    let basename = input
+        .file_path
+        .as_deref()
+        .map(|p| p.rsplit('/').next().unwrap_or(p));
+    let raw = input
+        .description
+        .as_deref()
+        .or(basename)
+        .or(input.pattern.as_deref())
+        .unwrap_or("");
     SafeText::redact(raw)
 }
 
 fn is_question(text: &str) -> bool {
-    text.trim_end_matches(|c: char| c.is_whitespace() || "*_`\"')".contains(c)).ends_with('?')
+    text.trim_end_matches(|c: char| c.is_whitespace() || "*_`\"')".contains(c))
+        .ends_with('?')
 }
 
 #[cfg(test)]
@@ -831,29 +1001,53 @@ pub(crate) mod tests {
         v
     }
     fn human(n: u32, text: &str) -> Value {
-        conv(n, "user", json!({"message": {"role": "user", "content": text}, "origin": {"kind": "human"}, "turnOrigin": "human"}))
+        conv(
+            n,
+            "user",
+            json!({"message": {"role": "user", "content": text}, "origin": {"kind": "human"}, "turnOrigin": "human"}),
+        )
     }
     fn notification(n: u32, xml: &str) -> Value {
-        conv(n, "user", json!({"message": {"role": "user", "content": xml}, "origin": {"kind": "task-notification"}}))
+        conv(
+            n,
+            "user",
+            json!({"message": {"role": "user", "content": xml}, "origin": {"kind": "task-notification"}}),
+        )
     }
     fn queued(n: u32, xml: &str) -> Value {
-        conv(n, "attachment", json!({"attachment": {"type": "queued_command", "prompt": xml, "commandMode": "task-notification", "origin": {"kind": "task-notification", "producer": "session-task"}}}))
+        conv(
+            n,
+            "attachment",
+            json!({"attachment": {"type": "queued_command", "prompt": xml, "commandMode": "task-notification", "origin": {"kind": "task-notification", "producer": "session-task"}}}),
+        )
     }
     fn queue_op(n: u32, xml: &str) -> Value {
         json!({"type": "queue-operation", "operation": "enqueue", "timestamp": ts(n), "sessionId": "s-1", "content": xml})
     }
     fn tool_use(n: u32, id: &str, name: &str, input: Value) -> Value {
-        conv(n, "assistant", json!({"message": {"model": "claude-opus-5-5", "id": format!("m{n}"), "role": "assistant",
+        conv(
+            n,
+            "assistant",
+            json!({"message": {"model": "claude-opus-5-5", "id": format!("m{n}"), "role": "assistant",
             "content": [{"type": "tool_use", "id": id, "name": name, "input": input}], "stop_reason": "tool_use",
-            "usage": {"input_tokens": 1, "cache_creation_input_tokens": 10, "cache_read_input_tokens": 100}}}))
+            "usage": {"input_tokens": 1, "cache_creation_input_tokens": 10, "cache_read_input_tokens": 100}}}),
+        )
     }
     fn tool_result(n: u32, id: &str, result: Value) -> Value {
-        conv(n, "user", json!({"message": {"role": "user", "content": [{"tool_use_id": id, "type": "tool_result", "content": "ok"}]}, "toolUseResult": result}))
+        conv(
+            n,
+            "user",
+            json!({"message": {"role": "user", "content": [{"tool_use_id": id, "type": "tool_result", "content": "ok"}]}, "toolUseResult": result}),
+        )
     }
     fn text_from(n: u32, s: &str, model: &str, ctx: u64) -> Value {
-        conv(n, "assistant", json!({"message": {"model": model, "id": format!("m{n}"), "role": "assistant",
+        conv(
+            n,
+            "assistant",
+            json!({"message": {"model": model, "id": format!("m{n}"), "role": "assistant",
             "content": [{"type": "text", "text": s}], "stop_reason": "end_turn",
-            "usage": {"input_tokens": ctx, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}))
+            "usage": {"input_tokens": ctx, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}),
+        )
     }
     fn text(n: u32, s: &str) -> Value {
         text_from(n, s, "claude-opus-5-5", 1000)
@@ -867,25 +1061,54 @@ pub(crate) mod tests {
     }
     fn turn_duration(n: u32, pending: Option<u16>) -> Value {
         match pending {
-            Some(p) => system(n, "turn_duration", json!({"durationMs": 1000, "pendingBackgroundAgentCount": p})),
+            Some(p) => system(
+                n,
+                "turn_duration",
+                json!({"durationMs": 1000, "pendingBackgroundAgentCount": p}),
+            ),
             None => system(n, "turn_duration", json!({"durationMs": 1000})),
         }
     }
     fn notif_xml(ids: &[&str], status: Option<&str>, extra: &str) -> String {
-        let ids: String = ids.iter().map(|i| format!("<task-id>{i}</task-id>\n")).collect();
-        let status = status.map(|s| format!("<status>{s}</status>\n")).unwrap_or_default();
-        format!("<task-notification>\n{ids}{status}<summary>x</summary>\n{extra}</task-notification>")
+        let ids: String = ids
+            .iter()
+            .map(|i| format!("<task-id>{i}</task-id>\n"))
+            .collect();
+        let status = status
+            .map(|s| format!("<status>{s}</status>\n"))
+            .unwrap_or_default();
+        format!(
+            "<task-notification>\n{ids}{status}<summary>x</summary>\n{extra}</task-notification>"
+        )
     }
     fn launch_agent(n: u32, tu: &str, agent: &str, description: &str) -> [Value; 2] {
         [
-            tool_use(n, tu, "Agent", json!({"description": description, "prompt": "p", "subagent_type": "Explore", "run_in_background": "true"})),
-            tool_result(n + 1, tu, json!({"isAsync": true, "status": "async_launched", "agentId": agent, "description": description})),
+            tool_use(
+                n,
+                tu,
+                "Agent",
+                json!({"description": description, "prompt": "p", "subagent_type": "Explore", "run_in_background": "true"}),
+            ),
+            tool_result(
+                n + 1,
+                tu,
+                json!({"isAsync": true, "status": "async_launched", "agentId": agent, "description": description}),
+            ),
         ]
     }
     fn launch_shell(n: u32, tu: &str, task: &str, description: &str) -> [Value; 2] {
         [
-            tool_use(n, tu, "Bash", json!({"command": format!("{SENTINEL} npm test"), "description": description, "run_in_background": true})),
-            tool_result(n + 1, tu, json!({"stdout": "", "stderr": "", "interrupted": false, "backgroundTaskId": task})),
+            tool_use(
+                n,
+                tu,
+                "Bash",
+                json!({"command": format!("{SENTINEL} npm test"), "description": description, "run_in_background": true}),
+            ),
+            tool_result(
+                n + 1,
+                tu,
+                json!({"stdout": "", "stderr": "", "interrupted": false, "backgroundTaskId": task}),
+            ),
         ]
     }
     fn fold(lines: &[Value]) -> Facts {
@@ -911,7 +1134,8 @@ pub(crate) mod tests {
         f.open_bg.keys().map(|k| k.0.as_str()).collect()
     }
     pub(crate) fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("agentically-test-{}-{name}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("agentically-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -924,37 +1148,80 @@ pub(crate) mod tests {
         lines.push(text(3, "Launched."));
         lines.push(turn_duration(4, Some(3)));
         let mut f = fold(&lines);
-        assert_eq!(f.turn, Turn::Closed { at: at(4), pending_agents: 3 });
+        assert_eq!(
+            f.turn,
+            Turn::Closed {
+                at: at(4),
+                pending_agents: 3
+            }
+        );
         assert_eq!(open_ids(&f), ["a1"]);
-        assert_eq!(f.open_bg[&TaskId("a1".into())].label.as_str(), "Launch audit");
+        assert_eq!(
+            f.open_bg[&TaskId("a1".into())].label.as_str(),
+            "Launch audit"
+        );
         assert_eq!(f.open_bg[&TaskId("a1".into())].started, at(1));
         assert!(f.last_tool.as_ref().unwrap().answered);
         fold_into(&mut f, &[human(5, "Next")]);
         assert_eq!(f.turn, Turn::Open { since: at(5) });
         fold_into(&mut f, &[turn_duration(6, None)]);
-        assert_eq!(f.turn, Turn::Closed { at: at(6), pending_agents: 0 });
+        assert_eq!(
+            f.turn,
+            Turn::Closed {
+                at: at(6),
+                pending_agents: 0
+            }
+        );
     }
 
     #[test]
     fn interrupt_without_turn_duration_is_not_an_open_turn() {
-        let interrupt = conv(2, "user", json!({"message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}));
-        let f = fold(&[human(0, "go"), tool_use(1, "t1", "Read", json!({"file_path": "/a/b.rs"})), interrupt]);
+        let interrupt = conv(
+            2,
+            "user",
+            json!({"message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}),
+        );
+        let f = fold(&[
+            human(0, "go"),
+            tool_use(1, "t1", "Read", json!({"file_path": "/a/b.rs"})),
+            interrupt,
+        ]);
         assert_eq!(f.turn, Turn::Interrupted { at: at(2) });
     }
 
     #[test]
     fn tool_results_and_local_command_echoes_do_not_open_turns() {
         let mut f = fold(&[human(0, "go"), text(1, "done"), turn_duration(2, None)]);
-        let echo = conv(3, "user", json!({"message": {"role": "user", "content": "<command-name>/effort</command-name>"}}));
-        let companion = conv(4, "user", json!({"isMeta": true, "turnCompanion": true, "message": {"role": "user", "content": [{"type": "text", "text": "reminder"}]}}));
+        let echo = conv(
+            3,
+            "user",
+            json!({"message": {"role": "user", "content": "<command-name>/effort</command-name>"}}),
+        );
+        let companion = conv(
+            4,
+            "user",
+            json!({"isMeta": true, "turnCompanion": true, "message": {"role": "user", "content": [{"type": "text", "text": "reminder"}]}}),
+        );
         fold_into(&mut f, &[echo, companion, tool_result(5, "t9", json!({}))]);
-        assert_eq!(f.turn, Turn::Closed { at: at(2), pending_agents: 0 });
+        assert_eq!(
+            f.turn,
+            Turn::Closed {
+                at: at(2),
+                pending_agents: 0
+            }
+        );
     }
 
     #[test]
     fn window_starting_mid_turn_infers_an_open_turn() {
         let mut f = Facts::default();
-        fold_into(&mut f, &[tool_use(1, "t1", "Read", json!({"file_path": "/a/b.rs"})), tool_result(2, "t1", json!({}))]);
+        fold_into(
+            &mut f,
+            &[
+                tool_use(1, "t1", "Read", json!({"file_path": "/a/b.rs"})),
+                tool_result(2, "t1", json!({})),
+            ],
+        );
         assert_eq!(f.turn, Turn::Open { since: at(1) });
         assert!(!f.horizon.from_start);
         assert_eq!(f.horizon.first_at, Some(at(1)));
@@ -969,10 +1236,24 @@ pub(crate) mod tests {
         assert!(f.notices.is_empty());
         fold_into(&mut f, &[queued(4, &done)]);
         assert!(f.open_bg.is_empty());
-        assert_eq!(f.notices[&TaskId("b1".into())], Notice { at: at(4), outcome: Some(TaskOutcome::Completed) });
+        assert_eq!(
+            f.notices[&TaskId("b1".into())],
+            Notice {
+                at: at(4),
+                outcome: Some(TaskOutcome::Completed)
+            }
+        );
         fold_into(&mut f, &[notification(5, &done)]);
-        assert_eq!(f.notices[&TaskId("b1".into())].at, at(5), "latest notice wins");
-        assert_eq!(f.turn, Turn::Open { since: at(5) }, "a delivered notification opens a turn");
+        assert_eq!(
+            f.notices[&TaskId("b1".into())].at,
+            at(5),
+            "latest notice wins"
+        );
+        assert_eq!(
+            f.turn,
+            Turn::Open { since: at(5) },
+            "a delivered notification opens a turn"
+        );
     }
 
     #[test]
@@ -982,56 +1263,154 @@ pub(crate) mod tests {
         lines.extend(launch_agent(5, "t3", "a1", "three"));
         let mut f = fold(&lines);
         assert_eq!(open_ids(&f), ["a1", "b1", "b2"]);
-        let sweep = notif_xml(&["b1", "b2", "a1", "__orphan_summary__:shell"], Some("stopped"), "");
+        let sweep = notif_xml(
+            &["b1", "b2", "a1", "__orphan_summary__:shell"],
+            Some("stopped"),
+            "",
+        );
         fold_into(&mut f, &[notification(8, &sweep)]);
         assert!(f.open_bg.is_empty());
         assert_eq!(f.notices.len(), 3);
-        assert!(f.notices.values().all(|n| n.outcome == Some(TaskOutcome::Stopped)));
+        assert!(
+            f.notices
+                .values()
+                .all(|n| n.outcome == Some(TaskOutcome::Stopped))
+        );
         assert!(f.notices.keys().all(|k| !k.0.starts_with("__orphan")));
     }
 
     #[test]
     fn monitor_event_without_status_keeps_it_open_until_expiry() {
         let mut f = fold(&[
-            tool_use(1, "t1", "Monitor", json!({"command": format!("{SENTINEL} gh run watch"), "description": "Watch CI", "timeout_ms": 1800000})),
-            tool_result(2, "t1", json!({"taskId": "b9", "timeoutMs": 1800000, "persistent": false})),
-            tool_use(3, "t2", "TaskUpdate", json!({"taskId": "1", "status": "completed"})),
-            tool_result(4, "t2", json!({"success": true, "taskId": "1", "updatedFields": ["status"]})),
+            tool_use(
+                1,
+                "t1",
+                "Monitor",
+                json!({"command": format!("{SENTINEL} gh run watch"), "description": "Watch CI", "timeout_ms": 1800000}),
+            ),
+            tool_result(
+                2,
+                "t1",
+                json!({"taskId": "b9", "timeoutMs": 1800000, "persistent": false}),
+            ),
+            tool_use(
+                3,
+                "t2",
+                "TaskUpdate",
+                json!({"taskId": "1", "status": "completed"}),
+            ),
+            tool_result(
+                4,
+                "t2",
+                json!({"success": true, "taskId": "1", "updatedFields": ["status"]}),
+            ),
         ]);
         assert_eq!(open_ids(&f), ["b9"]);
         assert_eq!(f.open_bg[&TaskId("b9".into())].kind, BgKind::Monitor);
-        fold_into(&mut f, &[queued(5, &notif_xml(&["b9"], None, "<event>run=in_progress</event>\n"))]);
+        fold_into(
+            &mut f,
+            &[queued(
+                5,
+                &notif_xml(&["b9"], None, "<event>run=in_progress</event>\n"),
+            )],
+        );
         assert_eq!(open_ids(&f), ["b9"], "an event is not a completion");
-        assert_eq!(f.notices[&TaskId("b9".into())], Notice { at: at(5), outcome: None });
-        fold_into(&mut f, &[queued(6, &notif_xml(&["b9"], None, "<event>[Monitor expired after 30m with 1 events delivered.]</event>\n"))]);
+        assert_eq!(
+            f.notices[&TaskId("b9".into())],
+            Notice {
+                at: at(5),
+                outcome: None
+            }
+        );
+        fold_into(
+            &mut f,
+            &[queued(
+                6,
+                &notif_xml(
+                    &["b9"],
+                    None,
+                    "<event>[Monitor expired after 30m with 1 events delivered.]</event>\n",
+                ),
+            )],
+        );
         assert!(f.open_bg.is_empty());
-        assert_eq!(f.notices[&TaskId("b9".into())].outcome, Some(TaskOutcome::Completed));
+        assert_eq!(
+            f.notices[&TaskId("b9".into())].outcome,
+            Some(TaskOutcome::Completed)
+        );
     }
 
     #[test]
     fn resumed_agent_reopens_after_its_notice() {
         let mut f = fold(&launch_agent(1, "t1", "a1", "audit"));
-        fold_into(&mut f, &[notification(3, &notif_xml(&["a1"], Some("completed"), ""))]);
+        fold_into(
+            &mut f,
+            &[notification(3, &notif_xml(&["a1"], Some("completed"), ""))],
+        );
         assert!(f.open_bg.is_empty());
-        fold_into(&mut f, &[
-            tool_use(4, "t2", "SendMessage", json!({"to": "a1", "summary": "more", "message": "also check docs"})),
-            tool_result(5, "t2", json!({"success": true, "message": "Resuming agent", "resumedAgentId": "a1"})),
-        ]);
+        fold_into(
+            &mut f,
+            &[
+                tool_use(
+                    4,
+                    "t2",
+                    "SendMessage",
+                    json!({"to": "a1", "summary": "more", "message": "also check docs"}),
+                ),
+                tool_result(
+                    5,
+                    "t2",
+                    json!({"success": true, "message": "Resuming agent", "resumedAgentId": "a1"}),
+                ),
+            ],
+        );
         assert_eq!(open_ids(&f), ["a1"]);
         assert_eq!(f.open_bg[&TaskId("a1".into())].kind, BgKind::Agent);
-        fold_into(&mut f, &[notification(9, &notif_xml(&["a1"], Some("failed"), ""))]);
+        fold_into(
+            &mut f,
+            &[notification(9, &notif_xml(&["a1"], Some("failed"), ""))],
+        );
         assert!(f.open_bg.is_empty());
-        assert_eq!(f.notices[&TaskId("a1".into())], Notice { at: at(9), outcome: Some(TaskOutcome::Failed) });
+        assert_eq!(
+            f.notices[&TaskId("a1".into())],
+            Notice {
+                at: at(9),
+                outcome: Some(TaskOutcome::Failed)
+            }
+        );
     }
 
     #[test]
     fn agent_async_is_decided_by_the_result_not_the_input_flag() {
         let f = fold(&[
-            tool_use(1, "t1", "Agent", json!({"description": "sync", "prompt": "p", "run_in_background": "true"})),
-            tool_result(2, "t1", json!({"status": "completed", "agentId": "a2", "content": [{"type": "text", "text": "done"}]})),
-            tool_use(3, "t2", "Agent", json!({"description": "unflagged", "prompt": "p"})),
-            tool_result(4, "t2", json!({"isAsync": true, "status": "async_launched", "agentId": "a3"})),
-            tool_use(5, "t3", "Agent", json!({"description": "refused", "prompt": "p", "run_in_background": "true"})),
+            tool_use(
+                1,
+                "t1",
+                "Agent",
+                json!({"description": "sync", "prompt": "p", "run_in_background": "true"}),
+            ),
+            tool_result(
+                2,
+                "t1",
+                json!({"status": "completed", "agentId": "a2", "content": [{"type": "text", "text": "done"}]}),
+            ),
+            tool_use(
+                3,
+                "t2",
+                "Agent",
+                json!({"description": "unflagged", "prompt": "p"}),
+            ),
+            tool_result(
+                4,
+                "t2",
+                json!({"isAsync": true, "status": "async_launched", "agentId": "a3"}),
+            ),
+            tool_use(
+                5,
+                "t3",
+                "Agent",
+                json!({"description": "refused", "prompt": "p", "run_in_background": "true"}),
+            ),
             tool_result(6, "t3", json!("Error: Concurrent subagent limit reached")),
         ]);
         assert_eq!(open_ids(&f), ["a3"]);
@@ -1046,7 +1425,10 @@ pub(crate) mod tests {
         let f = fold(&lines);
         assert_eq!(open_ids(&f), ["b1", "b2"]);
         assert!(f.open_bg.values().all(|b| b.kind == BgKind::Shell));
-        assert_eq!(f.open_bg[&TaskId("b2".into())].label.as_str(), "Boot the dev stack");
+        assert_eq!(
+            f.open_bg[&TaskId("b2".into())].label.as_str(),
+            "Boot the dev stack"
+        );
     }
 
     #[test]
@@ -1057,7 +1439,10 @@ pub(crate) mod tests {
         let f = fold(&lines);
         assert!(!format!("{f:?}").contains(SENTINEL));
         assert!(f.open_bg.is_empty());
-        assert_eq!(f.notices[&TaskId("b1".into())].outcome, Some(TaskOutcome::Stopped));
+        assert_eq!(
+            f.notices[&TaskId("b1".into())].outcome,
+            Some(TaskOutcome::Stopped)
+        );
     }
 
     #[test]
@@ -1068,17 +1453,34 @@ pub(crate) mod tests {
         lines.push(system(7, "agents_killed", json!({})));
         let f = fold(&lines);
         assert_eq!(open_ids(&f), ["b1"]);
-        assert_eq!(f.notices[&TaskId("a1".into())], Notice { at: at(7), outcome: Some(TaskOutcome::Killed) });
-        assert_eq!(f.notices[&TaskId("a2".into())].outcome, Some(TaskOutcome::Killed));
+        assert_eq!(
+            f.notices[&TaskId("a1".into())],
+            Notice {
+                at: at(7),
+                outcome: Some(TaskOutcome::Killed)
+            }
+        );
+        assert_eq!(
+            f.notices[&TaskId("a2".into())].outcome,
+            Some(TaskOutcome::Killed)
+        );
     }
 
     #[test]
     fn cost_state_marks_exit_and_a_resume_clears_it() {
         let mut f = fold(&launch_agent(1, "t1", "a1", "one"));
-        fold_into(&mut f, &[json!({"type": "cost-state", "sessionId": "s-1", "totalCostUSD": 1.25, "startTime": 1})]);
+        fold_into(
+            &mut f,
+            &[
+                json!({"type": "cost-state", "sessionId": "s-1", "totalCostUSD": 1.25, "startTime": 1}),
+            ],
+        );
         assert_eq!(f.exit, Some(ExitTotals { cost_usd: 1.25 }));
         assert!(f.open_bg.is_empty());
-        fold_into(&mut f, &[json!({"type": "last-prompt", "lastPrompt": "x", "sessionId": "s-1"})]);
+        fold_into(
+            &mut f,
+            &[json!({"type": "last-prompt", "lastPrompt": "x", "sessionId": "s-1"})],
+        );
         assert!(f.exit.is_some(), "metadata after cost-state is still exit");
         fold_into(&mut f, &[human(3, "resume")]);
         assert_eq!(f.exit, None);
@@ -1099,7 +1501,11 @@ pub(crate) mod tests {
             text_from(2, "fake", "<synthetic>", 0),
             json!({"type": "worktree-state", "worktreeSession": null}),
             json!({"type": "bridge-session", "bridgeSessionId": ""}),
-            system(3, "away_summary", json!({"content": "Watching CI for you. (disable recaps in /config)"})),
+            system(
+                3,
+                "away_summary",
+                json!({"content": "Watching CI for you. (disable recaps in /config)"}),
+            ),
         ]);
         assert_eq!(f.titles.ai.as_ref().unwrap().as_str(), "Second");
         assert_eq!(f.titles.custom.as_ref().unwrap().as_str(), "Renamed");
@@ -1107,7 +1513,10 @@ pub(crate) mod tests {
         assert_eq!(f.prs, [42, 43]);
         assert_eq!(f.usage.as_ref().unwrap().ctx_tokens, 5000);
         assert!(!f.bridge_active);
-        assert_eq!(f.away_summary.as_ref().unwrap().as_str(), "Watching CI for you.");
+        assert_eq!(
+            f.away_summary.as_ref().unwrap().as_str(),
+            "Watching CI for you."
+        );
         assert_eq!(f.last_text.as_ref().unwrap().first_line.as_str(), "fake");
     }
 
@@ -1115,12 +1524,21 @@ pub(crate) mod tests {
     fn sidecar_tail_tracks_finishedness() {
         let mut f = fold_file(&Path::new(FIXTURES).join("transcript/sidecar_handback.jsonl"));
         assert!(f.tail_looks_finished, "handback tool_result ends the tail");
-        assert_eq!(f.last_activity, Some(At::parse_iso("2026-01-02T10:00:14.000Z").unwrap()));
+        assert_eq!(
+            f.last_activity,
+            Some(At::parse_iso("2026-01-02T10:00:14.000Z").unwrap())
+        );
         assert_eq!(f.last_tool.as_ref().unwrap().name, "SubagentHandback");
-        fold_into(&mut f, &[tool_use(20, "t5", "Read", json!({"file_path": "/a/b.rs"}))]);
+        fold_into(
+            &mut f,
+            &[tool_use(20, "t5", "Read", json!({"file_path": "/a/b.rs"}))],
+        );
         assert!(!f.tail_looks_finished);
         fold_into(&mut f, &[tool_result(21, "t5", json!({}))]);
-        assert!(!f.tail_looks_finished, "an ordinary tool_result is mid-work");
+        assert!(
+            !f.tail_looks_finished,
+            "an ordinary tool_result is mid-work"
+        );
         fold_into(&mut f, &[text(22, "All done.")]);
         assert!(f.tail_looks_finished);
     }
@@ -1128,15 +1546,47 @@ pub(crate) mod tests {
     #[test]
     fn wakeup_is_replaced_cancelled_and_fired() {
         let mut f = fold(&[
-            tool_use(1, "t1", "ScheduleWakeup", json!({"delaySeconds": 60, "prompt": "check"})),
-            tool_result(2, "t1", json!({"scheduledFor": 1_700_000_060_000u64, "clampedDelaySeconds": 60})),
+            tool_use(
+                1,
+                "t1",
+                "ScheduleWakeup",
+                json!({"delaySeconds": 60, "prompt": "check"}),
+            ),
+            tool_result(
+                2,
+                "t1",
+                json!({"scheduledFor": 1_700_000_060_000u64, "clampedDelaySeconds": 60}),
+            ),
         ]);
         assert_eq!(f.wakeup, Some(At(1_700_000_060_000)));
-        fold_into(&mut f, &[tool_use(3, "t2", "ScheduleWakeup", json!({"delaySeconds": 120})), tool_result(4, "t2", json!({"scheduledFor": 1_700_000_120_000u64}))]);
+        fold_into(
+            &mut f,
+            &[
+                tool_use(3, "t2", "ScheduleWakeup", json!({"delaySeconds": 120})),
+                tool_result(4, "t2", json!({"scheduledFor": 1_700_000_120_000u64})),
+            ],
+        );
         assert_eq!(f.wakeup, Some(At(1_700_000_120_000)));
-        fold_into(&mut f, &[tool_use(5, "t3", "ScheduleWakeup", json!({"stop": true})), tool_result(6, "t3", json!({"scheduledFor": 0, "stopped": true, "cancelledWakeups": 1}))]);
+        fold_into(
+            &mut f,
+            &[
+                tool_use(5, "t3", "ScheduleWakeup", json!({"stop": true})),
+                tool_result(
+                    6,
+                    "t3",
+                    json!({"scheduledFor": 0, "stopped": true, "cancelledWakeups": 1}),
+                ),
+            ],
+        );
         assert_eq!(f.wakeup, None);
-        fold_into(&mut f, &[tool_use(7, "t4", "ScheduleWakeup", json!({"delaySeconds": 5})), tool_result(8, "t4", json!({"scheduledFor": 1_700_000_200_000u64})), system(9, "scheduled_task_fire", json!({"taskId": "w1"}))]);
+        fold_into(
+            &mut f,
+            &[
+                tool_use(7, "t4", "ScheduleWakeup", json!({"delaySeconds": 5})),
+                tool_result(8, "t4", json!({"scheduledFor": 1_700_000_200_000u64})),
+                system(9, "scheduled_task_fire", json!({"taskId": "w1"})),
+            ],
+        );
         assert_eq!(f.wakeup, None);
     }
 
@@ -1149,7 +1599,10 @@ pub(crate) mod tests {
         assert!(!is_question(""));
         let f = fold(&[text(1, "CI is still running.\n\nShall I wait for it?")]);
         assert!(f.last_text.as_ref().unwrap().is_question);
-        assert_eq!(f.last_text.as_ref().unwrap().first_line.as_str(), "CI is still running.");
+        assert_eq!(
+            f.last_text.as_ref().unwrap().first_line.as_str(),
+            "CI is still running."
+        );
     }
 
     #[test]
@@ -1160,9 +1613,16 @@ pub(crate) mod tests {
         f.apply_line(br#"{"type":"brand-new-record","payload":1}"#);
         assert_eq!((f.lines, f.skipped, f.unknown), (2, 1, 1));
         f.apply_line(br#"{"type":"file-history-snapshot","messageId":"x", this is not valid json"#);
-        assert_eq!((f.lines, f.skipped, f.unknown), (3, 1, 1), "file-history is rejected before parsing");
+        assert_eq!(
+            (f.lines, f.skipped, f.unknown),
+            (3, 1, 1),
+            "file-history is rejected before parsing"
+        );
         f.apply_line(br#"{"type":"user","message":{"role":"user","content":"no timestamp"}}"#);
-        assert_eq!(f.skipped, 2, "a conversational record without a timestamp is unusable");
+        assert_eq!(
+            f.skipped, 2,
+            "a conversational record without a timestamp is unusable"
+        );
         f.apply_line(b"   ");
         assert_eq!(f.lines, 4);
     }
@@ -1171,14 +1631,32 @@ pub(crate) mod tests {
     fn fixture_session_folds_to_expected_facts() {
         let f = fold_file(&Path::new(FIXTURES).join("transcript/session.jsonl"));
         assert_eq!((f.skipped, f.unknown), (0, 0));
-        assert_eq!(f.turn, Turn::Closed { at: At::parse_iso("2026-01-02T10:03:06.000Z").unwrap(), pending_agents: 1 });
+        assert_eq!(
+            f.turn,
+            Turn::Closed {
+                at: At::parse_iso("2026-01-02T10:03:06.000Z").unwrap(),
+                pending_agents: 1
+            }
+        );
         assert_eq!(open_ids(&f), ["a1111111111111111", "b5e6f7a8b"]);
         assert_eq!(f.open_bg[&TaskId("b5e6f7a8b".into())].kind, BgKind::Monitor);
-        assert_eq!(f.open_bg[&TaskId("b5e6f7a8b".into())].label.as_str(), "Watch CI for PR 42");
-        assert_eq!(f.notices[&TaskId("b1a2b3c4d".into())].outcome, Some(TaskOutcome::Completed));
+        assert_eq!(
+            f.open_bg[&TaskId("b5e6f7a8b".into())].label.as_str(),
+            "Watch CI for PR 42"
+        );
+        assert_eq!(
+            f.notices[&TaskId("b1a2b3c4d".into())].outcome,
+            Some(TaskOutcome::Completed)
+        );
         assert_eq!(f.notices[&TaskId("b5e6f7a8b".into())].outcome, None);
-        assert_eq!(f.titles.ai.as_ref().unwrap().as_str(), "Retry logic for fetch helper");
-        assert_eq!(f.last_prompt.as_ref().unwrap().as_str(), "Add retry to the fetch helper");
+        assert_eq!(
+            f.titles.ai.as_ref().unwrap().as_str(),
+            "Retry logic for fetch helper"
+        );
+        assert_eq!(
+            f.last_prompt.as_ref().unwrap().as_str(),
+            "Add retry to the fetch helper"
+        );
         assert_eq!(f.prs, [42, 43]);
         assert_eq!(f.worktree.as_ref().unwrap().name, "retry");
         assert_eq!(f.branch.as_deref(), Some("feat/retry"));
@@ -1217,13 +1695,22 @@ pub(crate) mod tests {
         let mut t = Transcript::open(path.clone(), Window::Main).unwrap();
         assert_eq!(t.facts().prs, [42, 43]);
         fs::remove_file(&path).unwrap();
-        fs::write(&path, [line(&json!({"type": "ai-title", "aiTitle": "Fresh"})), b"\n".to_vec()].concat()).unwrap();
+        fs::write(
+            &path,
+            [
+                line(&json!({"type": "ai-title", "aiTitle": "Fresh"})),
+                b"\n".to_vec(),
+            ]
+            .concat(),
+        )
+        .unwrap();
         assert!(t.pump().unwrap());
         assert_eq!(t.facts().titles.ai.as_ref().unwrap().as_str(), "Fresh");
         assert!(t.facts().prs.is_empty());
         let mut f = fs::OpenOptions::new().write(true).open(&path).unwrap();
         f.set_len(0).unwrap();
-        f.write_all(&line(&json!({"type": "ai-title", "aiTitle": "S"}))).unwrap();
+        f.write_all(&line(&json!({"type": "ai-title", "aiTitle": "S"})))
+            .unwrap();
         f.write_all(b"\n").unwrap();
         drop(f);
         assert!(t.pump().unwrap(), "a shrunk file (same inode) reopens");
@@ -1243,14 +1730,20 @@ pub(crate) mod tests {
         for _ in 0..padding_kb_before {
             f.write_all(&padding_line("mode", 1)).unwrap();
         }
-        for (ty, key, val) in [("last-prompt", "lastPrompt", "old"), ("ai-title", "aiTitle", "Old")] {
+        for (ty, key, val) in [
+            ("last-prompt", "lastPrompt", "old"),
+            ("ai-title", "aiTitle", "Old"),
+        ] {
             f.write_all(&line(&json!({"type": ty, key: val}))).unwrap();
             f.write_all(b"\n").unwrap();
         }
         for _ in 0..100 {
             f.write_all(&padding_line("mode", 1)).unwrap();
         }
-        for (ty, key, val) in [("last-prompt", "lastPrompt", "new"), ("ai-title", "aiTitle", "New")] {
+        for (ty, key, val) in [
+            ("last-prompt", "lastPrompt", "new"),
+            ("ai-title", "aiTitle", "New"),
+        ] {
             f.write_all(&line(&json!({"type": ty, key: val}))).unwrap();
             f.write_all(b"\n").unwrap();
         }
@@ -1271,14 +1764,25 @@ pub(crate) mod tests {
         assert!(!t.facts().horizon.from_start);
         assert_eq!(t.facts().horizon.first_at, Some(at(7)));
         assert_eq!(t.facts().turn, Turn::Open { since: at(7) });
-        assert!(t.facts().lines > 300 && t.facts().lines < 1500, "the 1 MB retry, not the 4 MB one");
+        assert!(
+            t.facts().lines > 300 && t.facts().lines < 1500,
+            "the 1 MB retry, not the 4 MB one"
+        );
 
         let trailing = metadata_layout("window-trailing", 600, 0);
         let t = Transcript::open(trailing, Window::Main).unwrap();
-        assert_eq!(t.facts().turn, Turn::Open { since: at(7) }, "the conversation before a trailing block is folded");
+        assert_eq!(
+            t.facts().turn,
+            Turn::Open { since: at(7) },
+            "the conversation before a trailing block is folded"
+        );
         assert!(t.facts().lines < 260);
 
-        let small = Transcript::open(Path::new(FIXTURES).join("transcript/session.jsonl"), Window::Main).unwrap();
+        let small = Transcript::open(
+            Path::new(FIXTURES).join("transcript/session.jsonl"),
+            Window::Main,
+        )
+        .unwrap();
         assert!(small.facts().horizon.from_start);
     }
 
@@ -1308,17 +1812,28 @@ pub(crate) mod tests {
         let mut dirs: Vec<PathBuf> = Vec::new();
         for e in fs::read_dir(&home).unwrap().filter_map(Result::ok) {
             let name = e.file_name().to_string_lossy().into_owned();
-            if (name == ".claude" || name.starts_with(".claude-")) && e.path().join("sessions").is_dir() {
+            if (name == ".claude" || name.starts_with(".claude-"))
+                && e.path().join("sessions").is_dir()
+            {
                 dirs.push(e.path());
             }
         }
-        let (mut files, mut lines, mut skipped, mut unknown, mut sidecars) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        let (mut files, mut lines, mut skipped, mut unknown, mut sidecars) =
+            (0u64, 0u64, 0u64, 0u64, 0u64);
         let mut unknown_types: BTreeMap<String, u64> = BTreeMap::new();
         let mut metas = (0u64, 0u64);
         let mut by_sid: HashMap<String, PathBuf> = HashMap::new();
         for dir in &dirs {
-            for slug in fs::read_dir(dir.join("projects")).into_iter().flatten().filter_map(Result::ok) {
-                for entry in fs::read_dir(slug.path()).into_iter().flatten().filter_map(Result::ok) {
+            for slug in fs::read_dir(dir.join("projects"))
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+            {
+                for entry in fs::read_dir(slug.path())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                {
                     let p = entry.path();
                     if p.extension().is_some_and(|x| x == "jsonl") {
                         files += 1;
@@ -1334,9 +1849,16 @@ pub(crate) mod tests {
                             f.open_count(BgKind::Monitor),
                             u8::from(f.wakeup.is_some())
                         );
-                        by_sid.insert(p.file_stem().unwrap().to_string_lossy().into_owned(), p.clone());
+                        by_sid.insert(
+                            p.file_stem().unwrap().to_string_lossy().into_owned(),
+                            p.clone(),
+                        );
                     } else if p.is_dir() {
-                        for sc in fs::read_dir(p.join("subagents")).into_iter().flatten().filter_map(Result::ok) {
+                        for sc in fs::read_dir(p.join("subagents"))
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Result::ok)
+                        {
                             let sp = sc.path();
                             let name = sp.file_name().unwrap().to_string_lossy().into_owned();
                             if name.ends_with(".jsonl") {
@@ -1347,8 +1869,14 @@ pub(crate) mod tests {
                                 unknown += f.unknown;
                             } else if name.ends_with(".meta.json") {
                                 metas.0 += 1;
-                                let id = crate::model::AgentId(name.trim_start_matches("agent-").trim_end_matches(".meta.json").to_owned());
-                                if crate::subagents::parse_meta(id, None, &fs::read(&sp).unwrap()).is_err() {
+                                let id = crate::model::AgentId(
+                                    name.trim_start_matches("agent-")
+                                        .trim_end_matches(".meta.json")
+                                        .to_owned(),
+                                );
+                                if crate::subagents::parse_meta(id, None, &fs::read(&sp).unwrap())
+                                    .is_err()
+                                {
                                     metas.1 += 1;
                                 }
                             }
@@ -1357,21 +1885,37 @@ pub(crate) mod tests {
                 }
             }
         }
-        println!("PROBE main_files={files} sidecar_files={sidecars} lines={lines} skipped={skipped} unknown={unknown}");
+        println!(
+            "PROBE main_files={files} sidecar_files={sidecars} lines={lines} skipped={skipped} unknown={unknown}"
+        );
         println!("PROBE unknown_types={unknown_types:?}");
         println!("PROBE metas={} meta_parse_failures={}", metas.0, metas.1);
         for dir in &dirs {
-            for e in fs::read_dir(dir.join("sessions")).unwrap().filter_map(Result::ok) {
+            for e in fs::read_dir(dir.join("sessions"))
+                .unwrap()
+                .filter_map(Result::ok)
+            {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if !name.ends_with(".json") || !name.trim_end_matches(".json").bytes().all(|b| b.is_ascii_digit()) {
+                if !name.ends_with(".json")
+                    || !name
+                        .trim_end_matches(".json")
+                        .bytes()
+                        .all(|b| b.is_ascii_digit())
+                {
                     continue;
                 }
-                let Ok(reg) = serde_json::from_slice::<Value>(&fs::read(e.path()).unwrap()) else { continue };
+                let Ok(reg) = serde_json::from_slice::<Value>(&fs::read(e.path()).unwrap()) else {
+                    continue;
+                };
                 let sid = reg["sessionId"].as_str().unwrap_or("").to_owned();
                 let status = reg["status"].as_str().unwrap_or("?");
                 let kind = reg["kind"].as_str().unwrap_or("?");
                 let Some(path) = by_sid.get(&sid) else {
-                    println!("LIVE {} pid={} {kind} {status} sid={sid} transcript=none", dir.display(), name);
+                    println!(
+                        "LIVE {} pid={} {kind} {status} sid={sid} transcript=none",
+                        dir.display(),
+                        name
+                    );
                     continue;
                 };
                 let full = fold_file(path);
@@ -1386,9 +1930,20 @@ pub(crate) mod tests {
                         std::mem::discriminant(&f.turn)
                     )
                 };
-                println!("LIVE {} pid={} {kind} {status} sid={sid}\n  path={}\n  full: {}\n  tail: {} from_start={} first_at={:?}\n  pending_agents={:?}",
-                    dir.display(), name, path.display(), counts(&full), counts(tail.facts()), tail.facts().horizon.from_start,
-                    tail.facts().horizon.first_at, match tail.facts().turn { Turn::Closed { pending_agents, .. } => Some(pending_agents), _ => None });
+                println!(
+                    "LIVE {} pid={} {kind} {status} sid={sid}\n  path={}\n  full: {}\n  tail: {} from_start={} first_at={:?}\n  pending_agents={:?}",
+                    dir.display(),
+                    name,
+                    path.display(),
+                    counts(&full),
+                    counts(tail.facts()),
+                    tail.facts().horizon.from_start,
+                    tail.facts().horizon.first_at,
+                    match tail.facts().turn {
+                        Turn::Closed { pending_agents, .. } => Some(pending_agents),
+                        _ => None,
+                    }
+                );
             }
         }
     }
@@ -1400,7 +1955,11 @@ pub(crate) mod tests {
             f.apply_line(l);
             if f.unknown > before {
                 let s = String::from_utf8_lossy(l);
-                let ty = s.split("\"type\":\"").nth(1).and_then(|r| r.split('"').next()).unwrap_or("?");
+                let ty = s
+                    .split("\"type\":\"")
+                    .nth(1)
+                    .and_then(|r| r.split('"').next())
+                    .unwrap_or("?");
                 *unknown_types.entry(ty.to_owned()).or_default() += 1;
             }
         }

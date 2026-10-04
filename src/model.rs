@@ -6,7 +6,9 @@ pub struct At(pub i64);
 
 impl At {
     pub fn parse_iso(s: &str) -> Option<At> {
-        chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| At(d.timestamp_millis()))
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| At(d.timestamp_millis()))
     }
     pub fn now() -> At {
         At(chrono::Utc::now().timestamp_millis())
@@ -54,7 +56,8 @@ impl JobId {
     // The id becomes a `claude attach <job>` argument, so anything that could read as a flag
     // or a path is rejected where it enters.
     pub fn parse(raw: &str) -> Option<JobId> {
-        (!raw.is_empty() && raw.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| JobId(raw.to_owned()))
+        (!raw.is_empty() && raw.bytes().all(|b| b.is_ascii_alphanumeric()))
+            .then(|| JobId(raw.to_owned()))
     }
 }
 
@@ -95,8 +98,15 @@ pub struct PaneInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RowKey {
-    Live { dir: ConfigDir, pid: Pid, proc_start: ProcStart },
-    Exited { dir: ConfigDir, job: JobId },
+    Live {
+        dir: ConfigDir,
+        pid: Pid,
+        proc_start: ProcStart,
+    },
+    Exited {
+        dir: ConfigDir,
+        job: JobId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -116,7 +126,8 @@ impl UserKey {
         if let Some(j) = s.strip_prefix("job:") {
             return JobId::parse(j).map(UserKey::Job);
         }
-        s.strip_prefix("sid:").map(|sid| UserKey::Session(SessionId(sid.to_owned())))
+        s.strip_prefix("sid:")
+            .map(|sid| UserKey::Session(SessionId(sid.to_owned())))
     }
 }
 
@@ -136,12 +147,22 @@ pub struct SafeText(String);
 impl SafeText {
     pub fn redact(raw: &str) -> SafeText {
         const MAX_CHARS: usize = 512;
-        let words: Vec<&str> = raw.split(|c: char| c.is_whitespace() || c.is_control()).filter(|w| !w.is_empty()).collect();
-        let first_cmd = words.iter().position(|w| !is_env_assignment(w)).unwrap_or(words.len());
+        let words: Vec<&str> = raw
+            .split(|c: char| c.is_whitespace() || c.is_control())
+            .filter(|w| !w.is_empty())
+            .collect();
+        let first_cmd = words
+            .iter()
+            .position(|w| !is_env_assignment(w))
+            .unwrap_or(words.len());
         let mut out = String::new();
         let mut redact_next = false;
         for w in &words[first_cmd..] {
-            let token = if redact_next || looks_secret(w) { "…" } else { w };
+            let token = if redact_next || looks_secret(w) {
+                "…"
+            } else {
+                w
+            };
             redact_next = w.eq_ignore_ascii_case("bearer");
             if !out.is_empty() {
                 out.push(' ');
@@ -168,7 +189,9 @@ impl SafeText {
 fn is_env_assignment(word: &str) -> bool {
     match word.split_once('=') {
         Some((name, _)) => {
-            name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            name.bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
                 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         }
         None => false,
@@ -176,9 +199,23 @@ fn is_env_assignment(word: &str) -> bool {
 }
 
 fn looks_secret(word: &str) -> bool {
-    const PREFIXES: [&str; 7] = ["sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-", "AKIA"];
-    let bare = word.rsplit_once('=').map_or(word, |(_, v)| v).trim_matches(|c| c == '"' || c == '\'');
-    if PREFIXES.iter().any(|p| bare.starts_with(p) && bare.len() > p.len() + 8) {
+    const PREFIXES: [&str; 7] = [
+        "sk-",
+        "ghp_",
+        "gho_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "AKIA",
+    ];
+    let bare = word
+        .rsplit_once('=')
+        .map_or(word, |(_, v)| v)
+        .trim_matches(|c| c == '"' || c == '\'');
+    if PREFIXES
+        .iter()
+        .any(|p| bare.starts_with(p) && bare.len() > p.len() + 8)
+    {
         return true;
     }
     let run = bare
@@ -220,7 +257,9 @@ impl Status {
 
     pub fn sort_key(&self) -> (Rank, u8) {
         let sub = match self {
-            Status::Idle { asked_question: true } => 0,
+            Status::Idle {
+                asked_question: true,
+            } => 0,
             _ => 1,
         };
         (self.rank(), sub)
@@ -283,7 +322,13 @@ impl Parked {
             || monitors.is_positive()
             || workflows > 0
             || wakeup.is_some();
-        something.then_some(Parked { agents, shells, monitors, workflows, wakeup })
+        something.then_some(Parked {
+            agents,
+            shells,
+            monitors,
+            workflows,
+            wakeup,
+        })
     }
     pub fn agents(&self) -> Count {
         self.agents
@@ -382,8 +427,19 @@ pub struct Row {
 impl Row {
     pub fn live_anchor(&self) -> Option<(Anchor, &SessionId)> {
         match (&self.key, &self.user_key) {
-            (RowKey::Live { dir, pid, proc_start }, UserKey::Session(sid)) => Some((
-                Anchor { dir: dir.clone(), pid: *pid, proc_start: proc_start.clone() },
+            (
+                RowKey::Live {
+                    dir,
+                    pid,
+                    proc_start,
+                },
+                UserKey::Session(sid),
+            ) => Some((
+                Anchor {
+                    dir: dir.clone(),
+                    pid: *pid,
+                    proc_start: proc_start.clone(),
+                },
                 sid,
             )),
             _ => None,
@@ -440,7 +496,10 @@ pub struct Node {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum NodeKind {
-    Agent { agent_type: String, model: Option<String> },
+    Agent {
+        agent_type: String,
+        model: Option<String>,
+    },
     Shell,
     Monitor,
     Workflow,
@@ -462,7 +521,11 @@ pub struct Detail {
 #[derive(Clone, Debug, PartialEq)]
 pub enum OpenTarget {
     Pane(PaneId),
-    Attach { dir: ConfigDir, job: JobId, title: String },
+    Attach {
+        dir: ConfigDir,
+        job: JobId,
+        title: String,
+    },
     Unreachable(String),
 }
 
@@ -499,17 +562,38 @@ pub enum Problem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
-    SetLabel { key: UserKey, label: Option<String> },
-    SetGroup { key: UserKey, group: Option<GroupName> },
-    Anchor { session: SessionId, anchor: Anchor },
-    Rekey { from: SessionId, to: SessionId },
+    SetLabel {
+        key: UserKey,
+        label: Option<String>,
+    },
+    SetGroup {
+        key: UserKey,
+        group: Option<GroupName>,
+    },
+    Anchor {
+        session: SessionId,
+        anchor: Anchor,
+    },
+    Rekey {
+        from: SessionId,
+        to: SessionId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Jump(PaneId),
-    Attach { dir: ConfigDir, job: JobId, title: String },
-    NewSession { dir: ConfigDir, cwd: PathBuf, group: Option<GroupName>, name: Option<String> },
+    Attach {
+        dir: ConfigDir,
+        job: JobId,
+        title: String,
+    },
+    NewSession {
+        dir: ConfigDir,
+        cwd: PathBuf,
+        group: Option<GroupName>,
+        name: Option<String>,
+    },
     Commit(Op),
     Quit,
 }
@@ -518,13 +602,19 @@ pub enum Effect {
 pub enum Outcome {
     Jumped,
     Attached,
-    Spawned { session: SessionId, group: Option<GroupName> },
+    Spawned {
+        session: SessionId,
+        group: Option<GroupName>,
+    },
     Committed,
     Failed(String),
 }
 
 pub fn row_order(a: &Row, b: &Row) -> Ordering {
-    a.status.sort_key().cmp(&b.status.sort_key()).then(a.since.cmp(&b.since))
+    a.status
+        .sort_key()
+        .cmp(&b.status.sort_key())
+        .then(a.since.cmp(&b.since))
 }
 
 #[cfg(test)]
@@ -533,14 +623,24 @@ mod tests {
 
     #[test]
     fn redact_drops_env_prefix_and_token_values() {
-        let shown = SafeText::redact("API_KEY=sk-abcdefghijklmnopqrstuv OTHER=1 curl -H 'Authorization: Bearer abc.def' https://x.io");
-        assert_eq!(shown.as_str(), "curl -H 'Authorization: Bearer … https://x.io");
+        let shown = SafeText::redact(
+            "API_KEY=sk-abcdefghijklmnopqrstuv OTHER=1 curl -H 'Authorization: Bearer abc.def' https://x.io",
+        );
+        assert_eq!(
+            shown.as_str(),
+            "curl -H 'Authorization: Bearer … https://x.io"
+        );
     }
 
     #[test]
     fn redact_hides_long_opaque_runs_but_keeps_paths() {
-        let shown = SafeText::redact("token ghp_0123456789abcdefghijABCDEFGHIJ0123 in /Users/me/workspace/some/really/long/path/name.rs");
-        assert_eq!(shown.as_str(), "token … in /Users/me/workspace/some/really/long/path/name.rs");
+        let shown = SafeText::redact(
+            "token ghp_0123456789abcdefghijABCDEFGHIJ0123 in /Users/me/workspace/some/really/long/path/name.rs",
+        );
+        assert_eq!(
+            shown.as_str(),
+            "token … in /Users/me/workspace/some/really/long/path/name.rs"
+        );
     }
 
     #[test]
@@ -554,7 +654,10 @@ mod tests {
 
     #[test]
     fn pane_id_keeps_only_the_pane_part() {
-        assert_eq!(PaneId::parse("0:@51.%251").map(|p| p.as_str().to_owned()), Some("%251".into()));
+        assert_eq!(
+            PaneId::parse("0:@51.%251").map(|p| p.as_str().to_owned()),
+            Some("%251".into())
+        );
         assert_eq!(PaneId::parse("0:@51.%"), None);
         assert_eq!(PaneId::parse("0:@51"), None);
     }
@@ -562,7 +665,10 @@ mod tests {
     #[test]
     fn config_dir_short_tags_only_non_default_dirs() {
         assert_eq!(ConfigDir(PathBuf::from("/Users/x/.claude")).short(), "");
-        assert_eq!(ConfigDir(PathBuf::from("/Users/x/.claude-personal")).short(), "personal");
+        assert_eq!(
+            ConfigDir(PathBuf::from("/Users/x/.claude-personal")).short(),
+            "personal"
+        );
     }
 
     #[test]
@@ -575,7 +681,10 @@ mod tests {
 
     #[test]
     fn user_key_round_trips() {
-        for k in [UserKey::Job(JobId("9b3323e1".into())), UserKey::Session(SessionId("u-1".into()))] {
+        for k in [
+            UserKey::Job(JobId("9b3323e1".into())),
+            UserKey::Session(SessionId("u-1".into())),
+        ] {
             assert_eq!(UserKey::decode(&k.encode()), Some(k));
         }
     }

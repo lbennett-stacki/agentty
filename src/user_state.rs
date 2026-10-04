@@ -52,14 +52,17 @@ impl UserState {
             Op::Rekey { from, to } => {
                 let from = UserKey::Session(from.clone());
                 if let Some(e) = self.entries.get(&from).cloned() {
-                    self.entries.entry(UserKey::Session(to.clone())).or_insert(e);
+                    self.entries
+                        .entry(UserKey::Session(to.clone()))
+                        .or_insert(e);
                     if let Some(e) = self.entries.get_mut(&from) {
                         e.anchor = None;
                     }
                 }
             }
         }
-        self.entries.retain(|_, e| e.label.is_some() || e.group.is_some());
+        self.entries
+            .retain(|_, e| e.label.is_some() || e.group.is_some());
         *self != before
     }
 
@@ -86,7 +89,10 @@ pub fn rebind<'a>(
                     .as_ref()
                     .is_some_and(|a| live.iter().any(|(la, ls)| la == a && ls == sid));
                 if !held {
-                    ops.push(Op::Anchor { session: (*sid).clone(), anchor: anchor.clone() });
+                    ops.push(Op::Anchor {
+                        session: (*sid).clone(),
+                        anchor: anchor.clone(),
+                    });
                 }
             }
             None => {
@@ -95,7 +101,10 @@ pub fn rebind<'a>(
                     _ => None,
                 });
                 if let Some(from) = from {
-                    ops.push(Op::Rekey { from: from.clone(), to: (*sid).clone() });
+                    ops.push(Op::Rekey {
+                        from: from.clone(),
+                        to: (*sid).clone(),
+                    });
                 }
             }
         }
@@ -253,7 +262,10 @@ fn decode(text: &str) -> Result<UserState, Decode> {
             Some((UserKey::decode(&k)?, entry))
         })
         .collect();
-    Ok(UserState { groups: wire.groups.into_iter().map(GroupName).collect(), entries })
+    Ok(UserState {
+        groups: wire.groups.into_iter().map(GroupName).collect(),
+        entries,
+    })
 }
 
 fn encode(state: &UserState) -> String {
@@ -302,14 +314,20 @@ mod tests {
         GroupName(g.into())
     }
     fn label(key: UserKey, l: &str) -> Op {
-        Op::SetLabel { key, label: Some(l.into()) }
+        Op::SetLabel {
+            key,
+            label: Some(l.into()),
+        }
     }
 
     struct Scratch(PathBuf);
     impl Scratch {
         fn new(name: &str) -> Scratch {
-            let p = std::env::temp_dir()
-                .join(format!("agentically-us-{}-{name}-{}", std::process::id(), At::now().0));
+            let p = std::env::temp_dir().join(format!(
+                "agentically-us-{}-{name}-{}",
+                std::process::id(),
+                At::now().0
+            ));
             fs::create_dir_all(&p).unwrap();
             Scratch(p)
         }
@@ -327,15 +345,36 @@ mod tests {
     fn every_op_applied_twice_equals_once_and_reports_no_second_change() {
         let mut base = UserState::default();
         base.apply(&label(skey("a"), "arch"));
-        base.apply(&Op::SetGroup { key: skey("a"), group: Some(group("main")) });
-        base.apply(&Op::Anchor { session: sid("a"), anchor: anchor(1) });
+        base.apply(&Op::SetGroup {
+            key: skey("a"),
+            group: Some(group("main")),
+        });
+        base.apply(&Op::Anchor {
+            session: sid("a"),
+            anchor: anchor(1),
+        });
         let ops = [
             label(UserKey::Job(JobId("9b3323e1".into())), "fees"),
-            Op::SetLabel { key: skey("a"), label: None },
-            Op::SetGroup { key: skey("a"), group: Some(group("side")) },
-            Op::SetGroup { key: skey("a"), group: None },
-            Op::Anchor { session: sid("a"), anchor: anchor(2) },
-            Op::Rekey { from: sid("a"), to: sid("b") },
+            Op::SetLabel {
+                key: skey("a"),
+                label: None,
+            },
+            Op::SetGroup {
+                key: skey("a"),
+                group: Some(group("side")),
+            },
+            Op::SetGroup {
+                key: skey("a"),
+                group: None,
+            },
+            Op::Anchor {
+                session: sid("a"),
+                anchor: anchor(2),
+            },
+            Op::Rekey {
+                from: sid("a"),
+                to: sid("b"),
+            },
         ];
         for op in &ops {
             let mut once = base.clone();
@@ -349,9 +388,18 @@ mod tests {
     #[test]
     fn set_group_appends_new_names_once_in_first_use_order() {
         let mut s = UserState::default();
-        s.apply(&Op::SetGroup { key: skey("a"), group: Some(group("x")) });
-        s.apply(&Op::SetGroup { key: skey("b"), group: Some(group("y")) });
-        s.apply(&Op::SetGroup { key: skey("c"), group: Some(group("x")) });
+        s.apply(&Op::SetGroup {
+            key: skey("a"),
+            group: Some(group("x")),
+        });
+        s.apply(&Op::SetGroup {
+            key: skey("b"),
+            group: Some(group("y")),
+        });
+        s.apply(&Op::SetGroup {
+            key: skey("c"),
+            group: Some(group("x")),
+        });
         assert_eq!(s.groups, vec![group("x"), group("y")]);
         assert_eq!(s.group_order(&group("y")), Some(1));
     }
@@ -360,8 +408,14 @@ mod tests {
     fn an_entry_emptied_by_clears_is_removed() {
         let mut s = UserState::default();
         s.apply(&label(skey("a"), "x"));
-        s.apply(&Op::Anchor { session: sid("a"), anchor: anchor(1) });
-        s.apply(&Op::SetLabel { key: skey("a"), label: None });
+        s.apply(&Op::Anchor {
+            session: sid("a"),
+            anchor: anchor(1),
+        });
+        s.apply(&Op::SetLabel {
+            key: skey("a"),
+            label: None,
+        });
         assert!(s.entries.is_empty());
     }
 
@@ -369,9 +423,15 @@ mod tests {
     fn rekey_never_overwrites_the_target_and_clears_the_source_anchor() {
         let mut s = UserState::default();
         s.apply(&label(skey("a"), "old"));
-        s.apply(&Op::Anchor { session: sid("a"), anchor: anchor(1) });
+        s.apply(&Op::Anchor {
+            session: sid("a"),
+            anchor: anchor(1),
+        });
         s.apply(&label(skey("b"), "mine"));
-        s.apply(&Op::Rekey { from: sid("a"), to: sid("b") });
+        s.apply(&Op::Rekey {
+            from: sid("a"),
+            to: sid("b"),
+        });
         assert_eq!(s.entry(&skey("b")).unwrap().label.as_deref(), Some("mine"));
         assert_eq!(s.entry(&skey("a")).unwrap().anchor, None);
         assert_eq!(s.entry(&skey("a")).unwrap().label.as_deref(), Some("old"));
@@ -382,8 +442,14 @@ mod tests {
         let mut s = UserState::default();
         s.apply(&label(skey("a"), "a"));
         s.apply(&label(skey("b"), "b"));
-        s.apply(&Op::Anchor { session: sid("a"), anchor: anchor(1) });
-        s.apply(&Op::Anchor { session: sid("b"), anchor: anchor(1) });
+        s.apply(&Op::Anchor {
+            session: sid("a"),
+            anchor: anchor(1),
+        });
+        s.apply(&Op::Anchor {
+            session: sid("b"),
+            anchor: anchor(1),
+        });
         assert_eq!(s.entry(&skey("a")).unwrap().anchor, None);
         assert_eq!(s.entry(&skey("b")).unwrap().anchor, Some(anchor(1)));
     }
@@ -394,7 +460,13 @@ mod tests {
         s.apply(&label(skey("a"), "arch"));
         let a = sid("a");
         let ops = rebind(&s, [(anchor(7), &a)]);
-        assert_eq!(ops, vec![Op::Anchor { session: sid("a"), anchor: anchor(7) }]);
+        assert_eq!(
+            ops,
+            vec![Op::Anchor {
+                session: sid("a"),
+                anchor: anchor(7)
+            }]
+        );
         for op in &ops {
             s.apply(op);
         }
@@ -402,7 +474,13 @@ mod tests {
 
         let b = sid("b");
         let ops = rebind(&s, [(anchor(7), &b)]);
-        assert_eq!(ops, vec![Op::Rekey { from: sid("a"), to: sid("b") }]);
+        assert_eq!(
+            ops,
+            vec![Op::Rekey {
+                from: sid("a"),
+                to: sid("b")
+            }]
+        );
         for op in &ops {
             s.apply(op);
         }
@@ -429,8 +507,14 @@ mod tests {
     fn encode_decode_round_trips_with_anchors() {
         let mut s = UserState::default();
         s.apply(&label(skey("91c7"), "arch arena"));
-        s.apply(&Op::SetGroup { key: skey("91c7"), group: Some(group("side quests")) });
-        s.apply(&Op::Anchor { session: sid("91c7"), anchor: anchor(41213) });
+        s.apply(&Op::SetGroup {
+            key: skey("91c7"),
+            group: Some(group("side quests")),
+        });
+        s.apply(&Op::Anchor {
+            session: sid("91c7"),
+            anchor: anchor(41213),
+        });
         s.apply(&label(UserKey::Job(JobId("9b3323e1".into())), "fees"));
         let text = encode(&s);
         assert!(text.contains("version = 1"), "{text}");
@@ -451,9 +535,18 @@ mod tests {
         let mut b = Store::load(dir.state()).unwrap();
         a.commit(&label(skey("1"), "one")).unwrap();
         b.commit(&label(skey("2"), "two")).unwrap();
-        a.commit(&Op::SetGroup { key: skey("3"), group: Some(group("g")) }).unwrap();
+        a.commit(&Op::SetGroup {
+            key: skey("3"),
+            group: Some(group("g")),
+        })
+        .unwrap();
         let fresh = Store::load(dir.state()).unwrap();
-        let labels: Vec<_> = fresh.state().entries.values().map(|e| e.label.clone()).collect();
+        let labels: Vec<_> = fresh
+            .state()
+            .entries
+            .values()
+            .map(|e| e.label.clone())
+            .collect();
         assert_eq!(labels, vec![Some("one".into()), Some("two".into()), None]);
         assert_eq!(fresh.state().groups, vec![group("g")]);
         assert_eq!(fresh.state(), a.state());
@@ -485,7 +578,10 @@ mod tests {
             .collect();
         assert_eq!(aside.len(), 1);
         assert!(aside[0].starts_with("state.toml.bad-"), "{aside:?}");
-        assert_eq!(fs::read_to_string(cfg.join(&aside[0])).unwrap(), "this is = = not toml");
+        assert_eq!(
+            fs::read_to_string(cfg.join(&aside[0])).unwrap(),
+            "this is = = not toml"
+        );
     }
 
     #[test]

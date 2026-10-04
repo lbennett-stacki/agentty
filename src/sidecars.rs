@@ -83,7 +83,10 @@ pub fn parse_statusline(bytes: &[u8], mtime: At) -> Result<Statusline, Problem> 
     let w: WireStatusline = serde_json::from_slice(bytes).map_err(|_| Problem::Unparsable)?;
     Ok(Statusline {
         ctx_used_pct: w.context_window.as_ref().and_then(|c| c.used_percentage),
-        window: w.context_window.as_ref().and_then(|c| c.context_window_size),
+        window: w
+            .context_window
+            .as_ref()
+            .and_then(|c| c.context_window_size),
         cost_usd: w.cost.and_then(|c| c.total_cost_usd),
         at: mtime,
     })
@@ -130,7 +133,10 @@ struct WireMember {
 pub fn parse_team(bytes: &[u8]) -> Result<Team, Problem> {
     let w: WireTeam = serde_json::from_slice(bytes).map_err(|_| Problem::Unparsable)?;
     Ok(Team {
-        name: w.name.filter(|n| !n.is_empty()).ok_or(Problem::MissingField("name"))?,
+        name: w
+            .name
+            .filter(|n| !n.is_empty())
+            .ok_or(Problem::MissingField("name"))?,
         lead: w.lead_session_id.filter(|s| !s.is_empty()).map(SessionId),
         members: w
             .members
@@ -146,8 +152,15 @@ pub fn parse_team(bytes: &[u8]) -> Result<Team, Problem> {
 }
 
 pub fn repo_root(cwd: &Path) -> Option<PathBuf> {
-    let (dir, dot_git) = cwd.ancestors().map(|d| (d, d.join(".git"))).find(|(_, g)| g.exists())?;
-    let root = if dot_git.is_file() { linked_main(dir, &dot_git) } else { dir.to_path_buf() };
+    let (dir, dot_git) = cwd
+        .ancestors()
+        .map(|d| (d, d.join(".git")))
+        .find(|(_, g)| g.exists())?;
+    let root = if dot_git.is_file() {
+        linked_main(dir, &dot_git)
+    } else {
+        dir.to_path_buf()
+    };
     Some(std::fs::canonicalize(&root).unwrap_or(root))
 }
 
@@ -155,15 +168,20 @@ pub fn repo_root(cwd: &Path) -> Option<PathBuf> {
 /// worktree, whose common dir is `<main>/.git` (or a bare repo, which is its own main). Any
 /// other gitdir (a submodule) is its own repo.
 fn linked_main(dir: &Path, dot_git: &Path) -> PathBuf {
-    let gitdir = std::fs::read_to_string(dot_git)
-        .ok()
-        .and_then(|s| s.lines().next()?.strip_prefix("gitdir:").map(|g| dir.join(g.trim())));
+    let gitdir = std::fs::read_to_string(dot_git).ok().and_then(|s| {
+        s.lines()
+            .next()?
+            .strip_prefix("gitdir:")
+            .map(|g| dir.join(g.trim()))
+    });
     let common = gitdir.as_deref().and_then(|g| {
         let worktrees = g.parent()?;
         (worktrees.file_name()? == "worktrees").then(|| worktrees.parent())?
     });
     match common {
-        Some(c) if c.file_name().is_some_and(|n| n == ".git") => c.parent().unwrap_or(c).to_path_buf(),
+        Some(c) if c.file_name().is_some_and(|n| n == ".git") => {
+            c.parent().unwrap_or(c).to_path_buf()
+        }
         Some(c) => c.to_path_buf(),
         None => dir.to_path_buf(),
     }
@@ -177,15 +195,24 @@ mod tests {
     #[test]
     fn task_parses_string_or_numeric_ids_and_unknown_status() {
         let t = parse_task(br#"{"id":"3","subject":"Write the parser","description":"x","status":"in_progress","blocks":[]}"#).unwrap();
-        assert_eq!((t.id, t.subject.as_str(), t.status), (3, "Write the parser", TaskStatus::InProgress));
+        assert_eq!(
+            (t.id, t.subject.as_str(), t.status),
+            (3, "Write the parser", TaskStatus::InProgress)
+        );
         let t = parse_task(br#"{"id":4,"subject":"Ship","status":"deferred"}"#).unwrap();
         assert_eq!((t.id, t.status), (4, TaskStatus::Other("deferred".into())));
-        assert_eq!(parse_task(br#"{"subject":"x"}"#), Err(Problem::MissingField("id")));
+        assert_eq!(
+            parse_task(br#"{"subject":"x"}"#),
+            Err(Problem::MissingField("id"))
+        );
     }
 
     #[test]
     fn task_subject_is_redacted() {
-        let t = parse_task(br#"{"id":"1","subject":"Rotate ghp_0123456789abcdefghijABCDEFGHIJ0123 now"}"#).unwrap();
+        let t = parse_task(
+            br#"{"id":"1","subject":"Rotate ghp_0123456789abcdefghijABCDEFGHIJ0123 now"}"#,
+        )
+        .unwrap();
         assert_eq!(t.subject.as_str(), "Rotate … now");
     }
 
@@ -196,20 +223,60 @@ mod tests {
             At(7),
         )
         .unwrap();
-        assert_eq!(s, Statusline { ctx_used_pct: Some(12.5), window: Some(200000), cost_usd: Some(0.75), at: At(7) });
+        assert_eq!(
+            s,
+            Statusline {
+                ctx_used_pct: Some(12.5),
+                window: Some(200000),
+                cost_usd: Some(0.75),
+                at: At(7)
+            }
+        );
         let s = parse_statusline(br#"{"session_id":"s"}"#, At(8)).unwrap();
-        assert_eq!(s, Statusline { ctx_used_pct: None, window: None, cost_usd: None, at: At(8) });
+        assert_eq!(
+            s,
+            Statusline {
+                ctx_used_pct: None,
+                window: None,
+                cost_usd: None,
+                at: At(8)
+            }
+        );
         assert_eq!(parse_statusline(b"{", At(9)), Err(Problem::Unparsable));
     }
 
     #[test]
     fn team_members_keep_only_real_tmux_panes() {
-        let bytes = std::fs::read(format!("{}/tests/fixtures/sidecars/team_config.json", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let bytes = std::fs::read(format!(
+            "{}/tests/fixtures/sidecars/team_config.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
         let team = parse_team(&bytes).unwrap();
         assert_eq!(team.name, "session-0a1b2c3d");
-        assert_eq!(team.lead, Some(SessionId("0a1b2c3d-0000-4000-8000-000000000000".into())));
-        let members: Vec<_> = team.members.iter().map(|m| (m.name.as_str(), m.pane.as_ref().map(PaneId::as_str), m.active)).collect();
-        assert_eq!(members, [("lead", None, true), ("tester", Some("%42"), true), ("helper", None, false)]);
+        assert_eq!(
+            team.lead,
+            Some(SessionId("0a1b2c3d-0000-4000-8000-000000000000".into()))
+        );
+        let members: Vec<_> = team
+            .members
+            .iter()
+            .map(|m| {
+                (
+                    m.name.as_str(),
+                    m.pane.as_ref().map(PaneId::as_str),
+                    m.active,
+                )
+            })
+            .collect();
+        assert_eq!(
+            members,
+            [
+                ("lead", None, true),
+                ("tester", Some("%42"), true),
+                ("helper", None, false)
+            ]
+        );
     }
 
     #[test]
@@ -220,12 +287,18 @@ mod tests {
         tmp.mkdir("demo/src/deep");
         tmp.mkdir("demo/.claude/worktrees/fees/src");
         let gitdir = std::fs::canonicalize(main.join(".git/worktrees/fees")).unwrap();
-        tmp.write("demo/.claude/worktrees/fees/.git", format!("gitdir: {}\n", gitdir.display()).as_bytes());
+        tmp.write(
+            "demo/.claude/worktrees/fees/.git",
+            format!("gitdir: {}\n", gitdir.display()).as_bytes(),
+        );
         let main_root = std::fs::canonicalize(&main).unwrap();
 
         assert_eq!(repo_root(&main), Some(main_root.clone()));
         assert_eq!(repo_root(&main.join("src/deep")), Some(main_root.clone()));
-        assert_eq!(repo_root(&main.join(".claude/worktrees/fees/src")), Some(main_root));
+        assert_eq!(
+            repo_root(&main.join(".claude/worktrees/fees/src")),
+            Some(main_root)
+        );
     }
 
     #[test]
@@ -233,11 +306,24 @@ mod tests {
         let tmp = Scratch::new("sidecars-layouts");
         tmp.mkdir("super/.git/modules/lib");
         tmp.write("super/lib/.git", b"gitdir: ../.git/modules/lib\n");
-        assert_eq!(repo_root(&tmp.path().join("super/lib")), std::fs::canonicalize(tmp.path().join("super/lib")).ok());
+        assert_eq!(
+            repo_root(&tmp.path().join("super/lib")),
+            std::fs::canonicalize(tmp.path().join("super/lib")).ok()
+        );
 
         tmp.mkdir("bare.git/worktrees/wt");
-        tmp.write("wt/.git", format!("gitdir: {}\n", tmp.path().join("bare.git/worktrees/wt").display()).as_bytes());
-        assert_eq!(repo_root(&tmp.path().join("wt")), std::fs::canonicalize(tmp.path().join("bare.git")).ok());
+        tmp.write(
+            "wt/.git",
+            format!(
+                "gitdir: {}\n",
+                tmp.path().join("bare.git/worktrees/wt").display()
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            repo_root(&tmp.path().join("wt")),
+            std::fs::canonicalize(tmp.path().join("bare.git")).ok()
+        );
     }
 
     #[test]

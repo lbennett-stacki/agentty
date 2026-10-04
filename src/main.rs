@@ -59,8 +59,9 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let roots = Roots::from_env()?;
-    let state_path =
-        args.state.unwrap_or_else(|| user_state::Store::default_path(&roots.home));
+    let state_path = args
+        .state
+        .unwrap_or_else(|| user_state::Store::default_path(&roots.home));
     let mut world = World::new(roots, Box::new(RealHost), ReadBudget::default());
     let mut store = user_state::Store::load(state_path)?;
     let mut app = ui::App::new(args.popup);
@@ -70,11 +71,18 @@ fn main() -> anyhow::Result<()> {
         for _ in 0..DUMP_MAX_REFRESHES {
             world.refresh(Wake::Tick);
             snap = snapshot(&world);
-            if !snap.diagnostics.iter().any(|d| d.problem == Problem::Deferred) {
+            if !snap
+                .diagnostics
+                .iter()
+                .any(|d| d.problem == Problem::Deferred)
+            {
                 break;
             }
         }
-        print!("{}", ui::dump(&app, &snap, store.state(), world.now(), DUMP_WIDTH));
+        print!(
+            "{}",
+            ui::dump(&app, &snap, store.state(), world.now(), DUMP_WIDTH)
+        );
         for d in &snap.diagnostics {
             println!("⚠ {:?} {:?} {}", d.source, d.problem, d.path);
         }
@@ -91,7 +99,12 @@ fn main() -> anyhow::Result<()> {
 
 fn snapshot(world: &World) -> Snapshot {
     let now = world.now();
-    derive::snapshot(world.sessions(), world.exited(now).into_iter(), world.diagnostics(), now)
+    derive::snapshot(
+        world.sessions(),
+        world.exited(now).into_iter(),
+        world.diagnostics(),
+        now,
+    )
 }
 
 fn run(
@@ -109,8 +122,11 @@ fn run(
     let mut last_refresh = Instant::now() - MIN_REFRESH;
     let mut doorbell = false;
     loop {
-        let deadline =
-            if doorbell { next_tick.min(last_refresh + MIN_REFRESH) } else { next_tick };
+        let deadline = if doorbell {
+            next_tick.min(last_refresh + MIN_REFRESH)
+        } else {
+            next_tick
+        };
         let first = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(msg) => Some(msg),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -120,7 +136,8 @@ fn run(
             match msg {
                 Msg::Doorbell => doorbell = true,
                 Msg::Term(Event::Key(k))
-                    if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) =>
+                    if k.code == KeyCode::Char('c')
+                        && k.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
                     return Ok(());
                 }
@@ -150,15 +167,17 @@ fn run(
                 problems.push(Problem::Unreadable);
             }
             snap = snapshot(world);
-            let ops = user_state::rebind(store.state(), snap.rows.iter().filter_map(Row::live_anchor));
+            let ops =
+                user_state::rebind(store.state(), snap.rows.iter().filter_map(Row::live_anchor));
             if ops.iter().any(|op| store.commit(op).is_err()) {
                 problems.push(Problem::Unavailable);
             }
-            snap.diagnostics.extend(problems.into_iter().map(|problem| Diagnostic {
-                source: DiagSource::UserState,
-                problem,
-                path: store.path().display().to_string(),
-            }));
+            snap.diagnostics
+                .extend(problems.into_iter().map(|problem| Diagnostic {
+                    source: DiagSource::UserState,
+                    problem,
+                    path: store.path().display().to_string(),
+                }));
             let roots = existing_watch_roots(world, store.path());
             if roots != watched {
                 _watcher = spawn_doorbell(tx.clone(), roots.clone()).ok();
@@ -167,7 +186,10 @@ fn run(
             doorbell = false;
             last_refresh = now;
             if wake == Wake::Tick {
-                let deferred = snap.diagnostics.iter().any(|d| d.problem == Problem::Deferred);
+                let deferred = snap
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.problem == Problem::Deferred);
                 next_tick = if deferred { now } else { now + TICK };
             }
         }
@@ -187,7 +209,13 @@ fn dispatch(
         match execute(effect, store) {
             None => return true,
             Some(outcome) => {
-                queue.extend(ui::update(app, snap, store.state(), ui::Input::Done(outcome), now));
+                queue.extend(ui::update(
+                    app,
+                    snap,
+                    store.state(),
+                    ui::Input::Done(outcome),
+                    now,
+                ));
             }
         }
     }
@@ -206,7 +234,10 @@ fn existing_watch_roots(world: &World, state_file: &Path) -> Vec<PathBuf> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClaudeRun {
     Attach(JobId),
-    New { session: SessionId, name: Option<String> },
+    New {
+        session: SessionId,
+        name: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,7 +246,12 @@ pub enum TmuxCmd {
     /// exits 0.
     ListPane(PaneId),
     SwitchClient(PaneId),
-    NewWindow { name: String, cwd: Option<PathBuf>, config_dir: ConfigDir, run: ClaudeRun },
+    NewWindow {
+        name: String,
+        cwd: Option<PathBuf>,
+        config_dir: ConfigDir,
+        run: ClaudeRun,
+    },
 }
 
 impl TmuxCmd {
@@ -226,7 +262,12 @@ impl TmuxCmd {
                 vec!["switch-client".into(), "-t".into(), p.as_str().into()]
             }
             // tmux execs a multi-argument command without `sh -c`, so no element needs quoting.
-            TmuxCmd::NewWindow { name, cwd, config_dir, run } => {
+            TmuxCmd::NewWindow {
+                name,
+                cwd,
+                config_dir,
+                run,
+            } => {
                 let mut v = vec!["new-window".into(), "-n".into(), name.clone()];
                 if let Some(cwd) = cwd {
                     v.extend(["-c".into(), cwd.display().to_string()]);
@@ -270,18 +311,34 @@ fn execute(effect: Effect, store: &mut user_state::Store) -> Option<Outcome> {
             }
         }
         Effect::Attach { dir, job, title } => {
-            let cmd =
-                TmuxCmd::NewWindow { name: title, cwd: None, config_dir: dir, run: ClaudeRun::Attach(job) };
-            if tmux(&cmd) { Outcome::Attached } else { failed("tmux new-window failed") }
+            let cmd = TmuxCmd::NewWindow {
+                name: title,
+                cwd: None,
+                config_dir: dir,
+                run: ClaudeRun::Attach(job),
+            };
+            if tmux(&cmd) {
+                Outcome::Attached
+            } else {
+                failed("tmux new-window failed")
+            }
         }
-        Effect::NewSession { dir, cwd, group, name } => match mint_uuid_v4() {
+        Effect::NewSession {
+            dir,
+            cwd,
+            group,
+            name,
+        } => match mint_uuid_v4() {
             Err(e) => Outcome::Failed(format!("could not mint a session id: {e}")),
             Ok(session) => {
                 let cmd = TmuxCmd::NewWindow {
                     name: name.clone().unwrap_or_else(|| "claude".into()),
                     cwd: Some(cwd),
                     config_dir: dir,
-                    run: ClaudeRun::New { session: session.clone(), name },
+                    run: ClaudeRun::New {
+                        session: session.clone(),
+                        name,
+                    },
                 };
                 if tmux(&cmd) {
                     Outcome::Spawned { session, group }
@@ -314,7 +371,14 @@ fn format_uuid_v4(mut b: [u8; 16]) -> String {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<Args> {
@@ -373,8 +437,14 @@ mod tests {
 
     #[test]
     fn jump_commands_target_the_bare_pane_id() {
-        assert_eq!(TmuxCmd::ListPane(pane()).argv(), ["list-panes", "-t", "%251"]);
-        assert_eq!(TmuxCmd::SwitchClient(pane()).argv(), ["switch-client", "-t", "%251"]);
+        assert_eq!(
+            TmuxCmd::ListPane(pane()).argv(),
+            ["list-panes", "-t", "%251"]
+        );
+        assert_eq!(
+            TmuxCmd::SwitchClient(pane()).argv(),
+            ["switch-client", "-t", "%251"]
+        );
     }
 
     #[test]
@@ -447,8 +517,14 @@ mod tests {
 
     #[test]
     fn uuid_v4_sets_version_and_variant_bits() {
-        assert_eq!(format_uuid_v4([0xff; 16]), "ffffffff-ffff-4fff-bfff-ffffffffffff");
-        assert_eq!(format_uuid_v4([0; 16]), "00000000-0000-4000-8000-000000000000");
+        assert_eq!(
+            format_uuid_v4([0xff; 16]),
+            "ffffffff-ffff-4fff-bfff-ffffffffffff"
+        );
+        assert_eq!(
+            format_uuid_v4([0; 16]),
+            "00000000-0000-4000-8000-000000000000"
+        );
         let a = mint_uuid_v4().unwrap().0;
         assert_eq!(a.len(), 36);
         assert_ne!(a, mint_uuid_v4().unwrap().0);
@@ -459,7 +535,12 @@ mod tests {
         let parse = |a: &[&str]| parse_args(a.iter().map(|s| s.to_string()));
         assert_eq!(
             parse(&["--popup", "--state", "/tmp/s.toml", "--dump"]).unwrap(),
-            Args { popup: true, dump: true, help: false, state: Some("/tmp/s.toml".into()) }
+            Args {
+                popup: true,
+                dump: true,
+                help: false,
+                state: Some("/tmp/s.toml".into())
+            }
         );
         assert_eq!(parse(&["--state=/x"]).unwrap().state, Some("/x".into()));
         assert!(parse(&["--pop"]).is_err());

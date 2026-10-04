@@ -1,0 +1,17 @@
+[package]
+name = "agentically"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Read-only, tmux-native dashboard over every live Claude Code session"
+
+[dependencies]
+ratatui = "0.30.2"
+notify = "8.2.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+anyhow = "1.0.104"
+dirs = "6.0.0"
+toml = "1.1.6"
+unicode-width = "0.2.2"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }

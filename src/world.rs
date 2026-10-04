@@ -1004,6 +1004,74 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "needs transcript.rs and subagents.rs bodies (W1); un-ignore at merge"]
+    fn read_budget_defers_first_sight_windows_to_later_ticks() {
+        // Defects: a cold start with many large transcripts reading them all in one frame, or a
+        // deferred transcript never opened.
+        let mut f = Fixture::new("world-budget");
+        let filler = "{\"type\":\"x\"}\n".repeat(3 << 20 >> 4);
+        for (pid, sid) in [(100, "big-a"), (101, "big-b")] {
+            f.session(".claude", pid, sid, json!({"status": "busy"}));
+            f.alive(pid);
+            f.home.write(&format!(".claude/projects/-p/{sid}.jsonl"), filler.as_bytes());
+        }
+        f.world.refresh(Wake::Tick);
+        let opened = |f: &Fixture| f.world.sessions().filter(|v| v.facts.is_some()).count();
+        assert_eq!(opened(&f), 1);
+        let deferred: Vec<_> = f.world.diagnostics().iter().filter(|d| d.problem == Problem::Deferred).collect();
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].path, "~/.claude/projects/-p/big-b.jsonl");
+
+        f.world.refresh(Wake::Tick);
+        assert_eq!(opened(&f), 2);
+        assert!(f.world.diagnostics().is_empty(), "{:?}", f.world.diagnostics());
+
+        // A doorbell never touches transcripts, and a dead session's fold is dropped.
+        f.home.remove(".claude/sessions/100.json");
+        f.world.refresh(Wake::Doorbell);
+        assert_eq!(f.world.transcripts.len(), 2);
+        f.world.refresh(Wake::Tick);
+        assert_eq!(f.world.transcripts.keys().collect::<Vec<_>>(), [&f.home.path().join(".claude/projects/-p/big-b.jsonl")]);
+    }
+
+    /// Read-only run of discovery, registry, `ps` and job parsing over the real home. Prints row
+    /// shapes and problem counts only: no ids, paths or file content.
+    #[test]
+    #[ignore = "reads the real ~/.claude*; run with --ignored --nocapture"]
+    fn real_data_probe() {
+        let mut world = World::new(Roots::from_env().unwrap(), Box::new(RealHost), ReadBudget::default());
+        world.refresh(Wake::Doorbell);
+        let panes = RealHost.panes().unwrap_or_default();
+        for dir in &world.dirs {
+            let (entries, problems) = registry::scan(dir);
+            let jobs = world.jobs.keys().filter(|(d, _)| d == dir).count();
+            println!("dir {:?}: {} records, {} unparsed, {} jobs", dir.short(), entries.len(), problems.len(), jobs);
+        }
+        for v in world.sessions() {
+            let in_snapshot = v.reg.pane.as_ref().is_some_and(|p| panes.iter().any(|q| &q.id == p));
+            println!(
+                "live dir={:?} pid={} kind={:?} status={:?} job={} job_parsed={} pane={} pane_in_tmux={} transcript={}",
+                v.dir.short(),
+                v.reg.pid.0,
+                v.reg.kind,
+                v.reg.status,
+                v.reg.job.is_some(),
+                v.job.is_some(),
+                v.reg.pane.is_some(),
+                in_snapshot,
+                world.live.iter().any(|l| l.reg.pid == v.reg.pid && l.transcript.is_some()),
+            );
+        }
+        let now = world.now();
+        for e in world.exited(now) {
+            println!("exited dir={:?} state={:?} hours_ago={}", e.dir.short(), e.job.state, now.millis_since(e.job.ended_at.unwrap()) / 3_600_000);
+        }
+        for d in world.diagnostics() {
+            println!("diagnostic {:?} {:?}", d.source, d.problem);
+        }
+    }
+
+    #[test]
     fn list_panes_output_parses_leniently() {
         // Defect: one odd line (an iTerm id, a blank) drops every pane and every Enter target.
         let panes = parse_panes("%254\t5431\n%250\t85078\nbogus\n%x\t1\n\n");

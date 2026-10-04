@@ -105,6 +105,11 @@ impl Transcript {
         Ok(t)
     }
 
+    /// Bytes the first-sight window folded: what `World` charges against its read budget.
+    pub fn window_bytes(&self) -> u64 {
+        self.stamp.len.min(self.window.max_bytes())
+    }
+
     /// Fold newly appended complete lines. Returns whether `facts` changed. Cheap when nothing
     /// changed: one `stat`, compared to `stamp`. If the stamp shows replacement (inode change or
     /// `len < offset`), re-open from a fresh window. An in-place rewrite to the same or a

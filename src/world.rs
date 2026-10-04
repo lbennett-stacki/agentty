@@ -435,17 +435,18 @@ impl World {
                     e.into_mut()
                 }
                 Entry::Vacant(v) => {
-                    let Some((_, len)) = stamp(&path) else { continue };
-                    // Charged at its worst case before opening. The first open of a refresh is
-                    // always admitted, so a budget smaller than one window still makes progress.
-                    let cost = len.min(Window::Main.max_bytes());
-                    if spent > 0 && spent + cost > budget {
+                    // Admitted while the budget is unspent, then charged what it actually read, so
+                    // one refresh opens many small-window files but never more than one budget's
+                    // worth of large ones past the first.
+                    if spent >= budget {
                         self.diagnostics.push(diag(home, DiagSource::Transcript, Problem::Deferred, &path));
                         continue;
                     }
-                    spent += cost;
                     match Transcript::open(path.clone(), Window::Main) {
-                        Ok(transcript) => v.insert(Tracked { subagents: Subagents::new(&path), transcript }),
+                        Ok(transcript) => {
+                            spent += transcript.window_bytes();
+                            v.insert(Tracked { subagents: Subagents::new(&path), transcript })
+                        }
                         Err(_) => {
                             self.diagnostics.push(diag(home, DiagSource::Transcript, Problem::Unreadable, &path));
                             continue;
@@ -1007,7 +1008,7 @@ pub(crate) mod tests {
         // Defects: a cold start with many large transcripts reading them all in one frame, or a
         // deferred transcript never opened.
         let mut f = Fixture::new("world-budget");
-        let filler = "{\"type\":\"x\"}\n".repeat(3 << 20 >> 4);
+        let filler = "{\"type\":\"x\"}\n".repeat(5 << 20 >> 4);
         for (pid, sid) in [(100, "big-a"), (101, "big-b")] {
             f.session(".claude", pid, sid, json!({"status": "busy"}));
             f.alive(pid);

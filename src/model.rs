@@ -20,10 +20,10 @@ pub struct At(pub i64);
 impl At {
     /// Parse an ISO-8601 timestamp; `None` on anything unparseable (lenient boundary).
     pub fn parse_iso(s: &str) -> Option<At> {
-        todo!("chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| At(d.timestamp_millis()))")
+        chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| At(d.timestamp_millis()))
     }
     pub fn now() -> At {
-        todo!()
+        At(chrono::Utc::now().timestamp_millis())
     }
     pub fn millis_since(self, earlier: At) -> i64 {
         self.0 - earlier.0
@@ -43,7 +43,11 @@ impl ConfigDir {
     /// Display form: `~/.claude-personal` -> `personal`, `~/.claude` -> `` (the default dir is
     /// unmarked so the common case adds no noise to a row).
     pub fn short(&self) -> &str {
-        todo!()
+        let name = self.0.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        match name.strip_prefix(".claude") {
+            Some(rest) => rest.trim_start_matches('-'),
+            None => name,
+        }
     }
 }
 
@@ -100,7 +104,9 @@ pub struct PaneId(String);
 
 impl PaneId {
     pub fn parse(tmux_field: &str) -> Option<PaneId> {
-        todo!("regex-free: find last '%', require one or more digits after it and nothing else")
+        let digits = &tmux_field[tmux_field.rfind('%')? + 1..];
+        (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| PaneId(format!("%{digits}")))
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -137,10 +143,16 @@ pub enum UserKey {
 impl UserKey {
     /// `job:<id>` / `sid:<uuid>`: the on-disk map key in state.toml.
     pub fn encode(&self) -> String {
-        todo!()
+        match self {
+            UserKey::Job(j) => format!("job:{}", j.0),
+            UserKey::Session(s) => format!("sid:{}", s.0),
+        }
     }
     pub fn decode(s: &str) -> Option<UserKey> {
-        todo!()
+        if let Some(j) = s.strip_prefix("job:") {
+            return Some(UserKey::Job(JobId(j.to_owned())));
+        }
+        s.strip_prefix("sid:").map(|sid| UserKey::Session(SessionId(sid.to_owned())))
     }
 }
 
@@ -177,7 +189,24 @@ impl SafeText {
     /// - collapse whitespace, newlines and control chars to single spaces, cap at 512 chars.
     /// Idempotent: `redact(redact(x).as_str()) == redact(x)`.
     pub fn redact(raw: &str) -> SafeText {
-        todo!()
+        const MAX_CHARS: usize = 512;
+        let words: Vec<&str> = raw.split(|c: char| c.is_whitespace() || c.is_control()).filter(|w| !w.is_empty()).collect();
+        let first_cmd = words.iter().position(|w| !is_env_assignment(w)).unwrap_or(words.len());
+        let mut out = String::new();
+        let mut redact_next = false;
+        for w in &words[first_cmd..] {
+            let token = if redact_next || looks_secret(w) { "…" } else { w };
+            redact_next = w.eq_ignore_ascii_case("bearer");
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(token);
+        }
+        if out.chars().count() > MAX_CHARS {
+            out = out.chars().take(MAX_CHARS - 1).collect();
+            out.push('…');
+        }
+        SafeText(out)
     }
     /// For text the app itself authored (fixed strings, counts). Never call with file content.
     pub fn ours(s: impl Into<String>) -> SafeText {
@@ -189,6 +218,30 @@ impl SafeText {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+}
+
+fn is_env_assignment(word: &str) -> bool {
+    match word.split_once('=') {
+        Some((name, _)) => {
+            !name.is_empty()
+                && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        }
+        None => false,
+    }
+}
+
+fn looks_secret(word: &str) -> bool {
+    const PREFIXES: [&str; 7] = ["sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-", "AKIA"];
+    let bare = word.rsplit_once('=').map_or(word, |(_, v)| v).trim_matches(|c| c == '"' || c == '\'');
+    if PREFIXES.iter().any(|p| bare.starts_with(p) && bare.len() > p.len() + 8) {
+        return true;
+    }
+    let run = bare
+        .split(|c: char| !(c.is_ascii_alphanumeric() || "_-+/=".contains(c)))
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    run >= 32 && !bare.starts_with('/') && !bare.contains("://")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -279,7 +332,16 @@ impl WaitingFor {
     /// Display text: the registry's own phrase (`permission prompt`, `input needed`, …), the raw
     /// string for `Other`, `waiting` for `Unspecified`.
     pub fn label(&self) -> &str {
-        todo!()
+        match self {
+            WaitingFor::Permission => "permission prompt",
+            WaitingFor::Input => "input needed",
+            WaitingFor::Dialog => "dialog open",
+            WaitingFor::Sandbox => "sandbox request",
+            WaitingFor::Worker => "worker request",
+            WaitingFor::GoalProposal => "goal proposal",
+            WaitingFor::Unspecified => "waiting",
+            WaitingFor::Other(s) => s,
+        }
     }
 }
 
@@ -651,4 +713,50 @@ pub enum Outcome {
 /// `since` first.
 pub fn row_order(a: &Row, b: &Row) -> Ordering {
     a.status.sort_key().cmp(&b.status.sort_key()).then(a.since.cmp(&b.since))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_drops_env_prefix_and_token_values() {
+        let shown = SafeText::redact("API_KEY=sk-abcdefghijklmnopqrstuv OTHER=1 curl -H 'Authorization: Bearer abc.def' https://x.io");
+        assert_eq!(shown.as_str(), "curl -H 'Authorization: Bearer … https://x.io");
+    }
+
+    #[test]
+    fn redact_hides_long_opaque_runs_but_keeps_paths() {
+        let shown = SafeText::redact("token ghp_0123456789abcdefghijABCDEFGHIJ0123 in /Users/me/workspace/some/really/long/path/name.rs");
+        assert_eq!(shown.as_str(), "token … in /Users/me/workspace/some/really/long/path/name.rs");
+    }
+
+    #[test]
+    fn redact_is_single_line_capped_and_idempotent() {
+        let raw = format!("line one\nline\ttwo {}", "word ".repeat(200));
+        let once = SafeText::redact(&raw);
+        assert!(!once.as_str().contains('\n'));
+        assert_eq!(once.as_str().chars().count(), 512);
+        assert_eq!(SafeText::redact(once.as_str()), once);
+    }
+
+    #[test]
+    fn pane_id_keeps_only_the_pane_part() {
+        assert_eq!(PaneId::parse("0:@51.%251").map(|p| p.as_str().to_owned()), Some("%251".into()));
+        assert_eq!(PaneId::parse("0:@51.%"), None);
+        assert_eq!(PaneId::parse("0:@51"), None);
+    }
+
+    #[test]
+    fn config_dir_short_tags_only_non_default_dirs() {
+        assert_eq!(ConfigDir(PathBuf::from("/Users/x/.claude")).short(), "");
+        assert_eq!(ConfigDir(PathBuf::from("/Users/x/.claude-personal")).short(), "personal");
+    }
+
+    #[test]
+    fn user_key_round_trips() {
+        for k in [UserKey::Job(JobId("9b3323e1".into())), UserKey::Session(SessionId("u-1".into()))] {
+            assert_eq!(UserKey::decode(&k.encode()), Some(k));
+        }
+    }
 }

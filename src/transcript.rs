@@ -628,7 +628,7 @@ struct WireWorktree {
     worktree_branch: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct WireToolInput {
     description: Option<String>,
     file_path: Option<String>,
@@ -857,9 +857,7 @@ fn assistant_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
                         at,
                         id: ToolUseId(id.clone()),
                         name: b.name.clone().unwrap_or_default(),
-                        summary: tool_summary(
-                            b.input.as_ref().unwrap_or(&WireToolInput::default()),
-                        ),
+                        summary: b.input.as_ref().map(tool_summary).unwrap_or_default(),
                     });
                 }
             }

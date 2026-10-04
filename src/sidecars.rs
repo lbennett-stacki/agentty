@@ -47,7 +47,7 @@ pub fn parse_task(bytes: &[u8]) -> Result<Task, Problem> {
 }
 
 pub fn task_dir(dir: &ConfigDir, sid: &SessionId) -> PathBuf {
-    dir.0.join("tasks").join(&sid.0)
+    tasks_root(dir).join(&sid.0)
 }
 
 pub fn tasks_root(dir: &ConfigDir) -> PathBuf {

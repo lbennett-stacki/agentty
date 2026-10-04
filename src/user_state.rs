@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{ErrorKind, Write};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -203,12 +202,8 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn stamp_of(path: &Path) -> std::io::Result<Option<FileStamp>> {
-    match fs::metadata(path) {
-        Ok(m) => Ok(Some(FileStamp {
-            ino: m.ino(),
-            len: m.len(),
-            mtime_ms: m.mtime() * 1000 + m.mtime_nsec() / 1_000_000,
-        })),
+    match FileStamp::of(path) {
+        Ok(s) => Ok(Some(s)),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }

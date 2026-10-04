@@ -12,7 +12,7 @@ use crate::model::{
 use crate::registry::{self, RegEntry};
 use crate::sidecars::{self, Statusline, Task, Team};
 use crate::subagents::Subagents;
-use crate::transcript::{Transcript, Window};
+use crate::transcript::{FileStamp, Transcript, Window};
 
 const EXITED_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 const REGLOB_MS: i64 = 5_000;
@@ -117,18 +117,6 @@ impl Default for ReadBudget {
     }
 }
 
-type Stamp = (i64, u64);
-
-fn stamp(path: &Path) -> Option<Stamp> {
-    let meta = std::fs::metadata(path).ok()?;
-    let mtime = meta
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?;
-    Some((mtime.as_millis() as i64, meta.len()))
-}
-
 pub struct World {
     roots: Roots,
     host: Box<dyn Host>,
@@ -136,12 +124,12 @@ pub struct World {
     dirs: Vec<ConfigDir>,
     live: Vec<Live>,
     live_jobs: HashSet<(ConfigDir, JobId)>,
-    jobs: BTreeMap<(ConfigDir, JobId), (Stamp, Job)>,
+    jobs: BTreeMap<(ConfigDir, JobId), (FileStamp, Job)>,
     transcripts: BTreeMap<PathBuf, Tracked>,
     resolved: HashMap<(ConfigDir, SessionId), Resolution>,
-    tasks: HashMap<(ConfigDir, SessionId), (Vec<Stamp>, Vec<Task>)>,
+    tasks: HashMap<(ConfigDir, SessionId), (Vec<FileStamp>, Vec<Task>)>,
     statusline: HashMap<SessionId, Statusline>,
-    teams: BTreeMap<PathBuf, (Stamp, Team)>,
+    teams: BTreeMap<PathBuf, (FileStamp, Team)>,
     repos: HashMap<PathBuf, Option<PathBuf>>,
     proc_starts: HashMap<Pid, ProcStart>,
     panes: Vec<PaneInfo>,
@@ -306,7 +294,7 @@ impl World {
                     continue;
                 };
                 let path = entry.path().join("state.json");
-                let Some(now_stamp) = stamp(&path) else {
+                let Ok(now_stamp) = FileStamp::of(&path) else {
                     continue;
                 };
                 let key = (dir.clone(), id);
@@ -472,7 +460,7 @@ impl World {
                 continue;
             }
             let files = task_files(&sidecars::task_dir(&l.dir, &l.reg.session_id));
-            let stamps: Vec<Stamp> = files.iter().map(|(_, s)| *s).collect();
+            let stamps: Vec<FileStamp> = files.iter().map(|(_, s)| *s).collect();
             let entry = match self.tasks.remove(&key) {
                 Some((old, tasks)) if old == stamps => (old, tasks),
                 _ => {
@@ -505,17 +493,17 @@ impl World {
         let mut next = HashMap::new();
         for sid in self.live.iter().map(|l| &l.reg.session_id) {
             let path = sidecars::statusline_path(&self.roots.cache, sid);
-            let Some((mtime, _)) = stamp(&path) else {
+            let Ok(FileStamp { mtime_ms, .. }) = FileStamp::of(&path) else {
                 continue;
             };
             match self.statusline.remove(sid) {
-                Some(s) if s.at == At(mtime) => {
+                Some(s) if s.at == At(mtime_ms) => {
                     next.insert(sid.clone(), s);
                 }
                 _ => {
                     let parsed = std::fs::read(&path)
                         .map_err(|_| Problem::Unreadable)
-                        .and_then(|b| sidecars::parse_statusline(&b, At(mtime)));
+                        .and_then(|b| sidecars::parse_statusline(&b, At(mtime_ms)));
                     match parsed {
                         Ok(s) => {
                             next.insert(sid.clone(), s);
@@ -540,7 +528,7 @@ impl World {
                 continue;
             };
             for path in listing.flatten().map(|e| e.path().join("config.json")) {
-                let Some(now_stamp) = stamp(&path) else {
+                let Ok(now_stamp) = FileStamp::of(&path) else {
                     continue;
                 };
                 match self.teams.remove(&path) {
@@ -677,16 +665,16 @@ fn glob_transcript(dir: &ConfigDir, sid: &SessionId) -> Option<PathBuf> {
         .ok()?
         .flatten()
         .map(|e| e.path().join(&name))
-        .filter_map(|p| stamp(&p).map(|s| (s.0, p)))
+        .filter_map(|p| FileStamp::of(&p).ok().map(|s| (s.mtime_ms, p)))
         .max()
         .map(|(_, p)| p)
 }
 
-fn task_files(dir: &Path) -> Vec<(PathBuf, Stamp)> {
+fn task_files(dir: &Path) -> Vec<(PathBuf, FileStamp)> {
     let Ok(listing) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut files: Vec<(u32, PathBuf, Stamp)> = listing
+    let mut files: Vec<(u32, PathBuf, FileStamp)> = listing
         .flatten()
         .filter_map(|e| {
             let n: u32 = e
@@ -696,7 +684,7 @@ fn task_files(dir: &Path) -> Vec<(PathBuf, Stamp)> {
                 .parse()
                 .ok()?;
             let path = e.path();
-            let s = stamp(&path)?;
+            let s = FileStamp::of(&path).ok()?;
             Some((n, path, s))
         })
         .collect();

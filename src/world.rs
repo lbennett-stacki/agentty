@@ -599,7 +599,6 @@ impl World {
                 dir,
                 job,
                 facts: job.transcript.as_ref().and_then(|p| self.transcripts.get(p)).map(|t| t.transcript.facts()),
-                repo: job.worktree_path.as_ref().and_then(|w| self.repos.get(w)).and_then(|r| r.as_deref()),
             })
             .collect()
     }
@@ -1004,7 +1003,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "needs transcript.rs and subagents.rs bodies (W1); un-ignore at merge"]
     fn read_budget_defers_first_sight_windows_to_later_ticks() {
         // Defects: a cold start with many large transcripts reading them all in one frame, or a
         // deferred transcript never opened.

@@ -151,10 +151,6 @@ impl Transcript {
         &self.facts
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn stamp(&self) -> FileStamp {
         self.stamp
     }

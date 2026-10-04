@@ -42,7 +42,6 @@ pub struct ExitedView<'a> {
     pub dir: &'a ConfigDir,
     pub job: &'a Job,
     pub facts: Option<&'a Facts>,
-    pub repo: Option<&'a Path>,
 }
 
 /// One subagent as `Subagents::agents` yields it: meta, rule-derived state, and the sidecar
@@ -400,8 +399,9 @@ fn tool_line(name: &str, summary: &SafeText) -> SafeText {
 }
 
 /// Expandable tree (depth 2): agents placed by `parent`; open shells, monitors and workflows as
-/// leaves; a pending wakeup as a leaf. Finished agents at each level collapse into
-/// `Tree::finished`; Running, Killed and Orphaned stay as nodes with their state.
+/// leaves; a pending wakeup as a leaf. Every agent that is not Running collapses into
+/// `Tree::finished` at its level: a cold start on a pstack session otherwise lists every
+/// grandchild of a long-finished agent as a live Orphaned node.
 ///
 /// For bg rows `fan` is the authoritative roster (GROUNDING 3.9): an agent with a fan entry is
 /// Running while that entry is open and Finished once it has `doneAt`, whatever its sidecar
@@ -460,7 +460,7 @@ fn agent_level(
             continue;
         }
         let state = fan_agent(v.job, &meta.id).map_or(state, fan_state);
-        if let NodeState::Finished(_) = state {
+        if state != NodeState::Running {
             t.finished += 1;
             continue;
         }
@@ -1270,7 +1270,7 @@ mod tests {
         facts.exit = Some(ExitTotals { cost_usd: 2.17 });
         let dir = ConfigDir(PathBuf::from("/home/u/.claude"));
         let j = Job { state: JobState::Done, ended_at: Some(at(-3600)), ..job() };
-        let row = exited_row(ExitedView { dir: &dir, job: &j, facts: Some(&facts), repo: None });
+        let row = exited_row(ExitedView { dir: &dir, job: &j, facts: Some(&facts) });
         assert_eq!(row.meta.cost, Some(Cost::Final(2.17)));
         assert_eq!(row.status, Status::Exited(JobOutcome::Done));
         assert_eq!(row.auto_group, AutoGroup::Finished);
@@ -1301,7 +1301,8 @@ mod tests {
 
     #[test]
     fn tree_nests_depth_two_agents_and_collapses_finished_per_level() {
-        // Defect: depth-2 agents flattened to the top, or finished agents listed as live.
+        // Defect: depth-2 agents flattened to the top, or finished, killed or orphaned agents
+        // listed as live.
         let fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
             f.open_bg.insert(TaskId("b1".into()), bg(BgKind::Monitor, "Watch CI"));
         });
@@ -1319,16 +1320,16 @@ mod tests {
             (&ms[2], NodeState::Killed, None),
             (&ms[3], NodeState::Running, None),
             (&ms[4], NodeState::Finished(TaskOutcome::Failed), None),
-            (&ms[5], NodeState::Finished(TaskOutcome::AwaitingNotice), None),
+            (&ms[5], NodeState::Orphaned, None),
         ];
         let t = tree(&fx.view(), &agents, T0);
         let top: Vec<(&str, NodeState)> = t.live.iter().map(|n| (n.id.0.as_str(), n.state)).collect();
-        assert_eq!(top, [("a1", NodeState::Running), ("a3", NodeState::Killed), ("b1", NodeState::Running)]);
-        assert_eq!(t.finished, 1);
+        assert_eq!(top, [("a1", NodeState::Running), ("b1", NodeState::Running)]);
+        assert_eq!(t.finished, 2);
         let a1 = &t.live[0];
         assert_eq!(a1.children.live.iter().map(|n| n.id.0.as_str()).collect::<Vec<_>>(), ["c1"]);
         assert_eq!(a1.children.finished, 2);
-        assert_eq!(t.live[2].kind, NodeKind::Monitor);
+        assert_eq!(t.live[1].kind, NodeKind::Monitor);
     }
 
     #[test]
@@ -1409,7 +1410,7 @@ mod tests {
         assert_eq!(open_target(&fx.view(), &SafeText::ours("t")), expected);
 
         let j = Job { name: Some("t".into()), ..job() };
-        let row = exited_row(ExitedView { dir: &fx.dir, job: &j, facts: None, repo: None });
+        let row = exited_row(ExitedView { dir: &fx.dir, job: &j, facts: None });
         assert_eq!(row.open, expected);
     }
 
@@ -1439,7 +1440,7 @@ mod tests {
         let gone = Job { id: JobId("deadbeef".into()), state: JobState::Other("zombie".into()), ..job() };
         let snap = snapshot(
             [hidden.view(), live_bg.view()].into_iter(),
-            [ExitedView { dir: &dir, job: &gone, facts: None, repo: None }].into_iter(),
+            [ExitedView { dir: &dir, job: &gone, facts: None }].into_iter(),
             &[],
             T0,
         );

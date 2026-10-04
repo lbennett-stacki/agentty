@@ -4,10 +4,6 @@
 //! threads only send `Msg`s: crossterm input, and the notify doorbell. A 1 s tick bounds
 //! staleness for liveness, transcript polling and time-in-status.
 
-// Scaffold phase only: other slices still have `todo!()` bodies whose items are unused. Remove
-// once every slice is implemented.
-#![allow(dead_code, unused_variables)]
-
 mod derive;
 mod jobs;
 mod model;
@@ -54,6 +50,10 @@ struct Args {
 const TICK: Duration = Duration::from_secs(1);
 /// Coalesce doorbells: at most one refresh per this interval.
 const MIN_REFRESH: Duration = Duration::from_millis(250);
+/// The read budget defers first-sight windows across ticks; `--dump` keeps refreshing until
+/// nothing is deferred so one frame shows every session fully read.
+const DUMP_MAX_REFRESHES: usize = 20;
+
 /// `--dump` width: the e2e scratch tmux session is 160 columns.
 const DUMP_WIDTH: u16 = 160;
 
@@ -78,9 +78,18 @@ fn main() -> anyhow::Result<()> {
     let mut app = ui::App::new(args.popup);
 
     if args.dump {
-        world.refresh(Wake::Tick);
-        let snap = snapshot(&world);
+        let mut snap = Snapshot::default();
+        for _ in 0..DUMP_MAX_REFRESHES {
+            world.refresh(Wake::Tick);
+            snap = snapshot(&world);
+            if !snap.diagnostics.iter().any(|d| d.problem == Problem::Deferred) {
+                break;
+            }
+        }
         print!("{}", ui::dump(&app, &snap, store.state(), world.now(), DUMP_WIDTH));
+        for d in &snap.diagnostics {
+            println!("⚠ {:?} {:?} {}", d.source, d.problem, d.path);
+        }
         return Ok(());
     }
 
@@ -174,7 +183,9 @@ fn run(
             doorbell = false;
             last_refresh = now;
             if wake == Wake::Tick {
-                next_tick = now + TICK;
+                let deferred = snap.diagnostics.iter().any(|d| d.problem == Problem::Deferred);
+                // Cold start reads windows a budget at a time; paint each batch, then continue at once.
+                next_tick = if deferred { now } else { now + TICK };
             }
         }
         terminal.draw(|f| ui::render(f, app, &snap, store.state(), world.now()))?;

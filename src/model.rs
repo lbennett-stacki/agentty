@@ -187,6 +187,7 @@ impl SafeText {
     /// - replace token-looking runs with `…`: `sk-…`, `ghp_…`, `xox?-…`, `AKIA…`, `Bearer …`,
     ///   and any [A-Za-z0-9_\-+/=]{32,} run (long base64/hex);
     /// - collapse whitespace, newlines and control chars to single spaces, cap at 512 chars.
+    ///
     /// Idempotent: `redact(redact(x).as_str()) == redact(x)`.
     pub fn redact(raw: &str) -> SafeText {
         const MAX_CHARS: usize = 512;

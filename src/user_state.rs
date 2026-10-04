@@ -17,7 +17,7 @@
 //! label = "arch arena"
 //! group = "side quests"
 //! [entries."sid:91c784ff-…".anchor]
-//! dir = "/Users/luke/.claude"
+//! dir = "/Users/you/.claude"
 //! pid = 41213
 //! proc_start = "Sun Oct  4 21:17:02 2026"
 //! [entries."job:9b3323e1"]

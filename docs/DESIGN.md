@@ -89,6 +89,8 @@ All ids are newtypes. `ProcStart::new` trims, so an untrimmed `ps` value cannot 
 
 The registry decides *whether* a session is parked. The transcript or `fan` decides *on what*. `job.state` never decides liveness (gotcha 4).
 
+A turn closes on `system/turn_duration`, which is authoritative and carries `pendingBackgroundAgentCount`. It also closes on the final assistant block with `stop_reason:"end_turn"` or on `system/stop_hook_summary`, because `sdk-cli` sessions (Remote Control bridges) never write `turn_duration`. A soft close never overwrites a recorded `turn_duration`. A later assistant block re-opens the turn, which covers a Stop hook that asks the model to continue.
+
 `Count { Exact(n), AtLeast(n) }` keeps the design honest about tail reads. `Parked::new` returns `Option` and rejects "parked on nothing", so `derive::parked` applies the registry fallbacks first: `shell` with no visible launch → `shells: AtLeast(1)`, `busy` with a closed turn and no evidence → `agents: AtLeast(1)`. Agents take `max(fold open agents, live tree agents, turn_duration.pendingBackgroundAgentCount)`, because the last of these also counts depth-2 agents.
 
 `RegStatus::Waiting(WaitingFor)` folds the reason into the status, with `WaitingFor::Unspecified` for a `waiting` record that has no `waitingFor` key. Waiting-without-reason and reason-without-waiting are unrepresentable.

@@ -335,18 +335,23 @@ impl Facts {
             Event::TurnClosed { at, pending_agents } => {
                 self.turn = Turn::Closed { at, pending_agents }
             }
+            Event::TurnEnded { at } => self.close_softly(at),
             Event::Text {
                 at,
                 first_line,
                 is_question,
+                ends_turn,
             } => {
-                self.infer_open(at);
+                self.reopen(at);
                 self.last_text = Some(TextBlock {
                     first_line,
                     at,
                     is_question,
                 });
                 self.tail_looks_finished = true;
+                if ends_turn {
+                    self.close_softly(at);
+                }
             }
             Event::ToolUse {
                 at,
@@ -354,7 +359,7 @@ impl Facts {
                 name,
                 summary,
             } => {
-                self.infer_open(at);
+                self.reopen(at);
                 self.pending_tools.insert(
                     id.clone(),
                     PendingTool {
@@ -450,6 +455,26 @@ impl Facts {
     fn infer_open(&mut self, at: At) {
         if self.turn == Turn::Unknown {
             self.turn = Turn::Open { since: at };
+        }
+    }
+
+    // Claude writes assistant blocks only inside a turn, so one after a close means a new
+    // turn started without a visible opener (a Stop hook asked the model to continue).
+    fn reopen(&mut self, at: At) {
+        if !matches!(self.turn, Turn::Open { .. }) {
+            self.turn = Turn::Open { since: at };
+        }
+    }
+
+    // `turn_duration` is sufficient but not necessary evidence of a closed turn: sdk-cli
+    // sessions never write it. The final `end_turn` block and `stop_hook_summary` close the
+    // turn too, without touching a close `turn_duration` already recorded.
+    fn close_softly(&mut self, at: At) {
+        if !matches!(self.turn, Turn::Closed { .. }) {
+            self.turn = Turn::Closed {
+                at,
+                pending_agents: 0,
+            };
         }
     }
 
@@ -554,6 +579,7 @@ struct WireMessage {
     model: Option<String>,
     content: Option<WireContent>,
     usage: Option<WireUsage>,
+    stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -675,10 +701,14 @@ enum Event {
         at: At,
         pending_agents: u16,
     },
+    TurnEnded {
+        at: At,
+    },
     Text {
         at: At,
         first_line: SafeText,
         is_question: bool,
+        ends_turn: bool,
     },
     ToolUse {
         at: At,
@@ -832,6 +862,7 @@ fn user_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
 
 fn assistant_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
     let Some(m) = &w.message else { return };
+    let ends_turn = m.stop_reason.as_deref() == Some("end_turn");
     if let Some(u) = &m.usage {
         let model = m.model.clone().unwrap_or_default();
         if model != "<synthetic>" {
@@ -869,6 +900,7 @@ fn assistant_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
                         at,
                         first_line: SafeText::redact(first),
                         is_question: is_question(text),
+                        ends_turn,
                     });
                 }
             }
@@ -883,6 +915,7 @@ fn system_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
             at,
             pending_agents: w.pending_background_agent_count.unwrap_or(0),
         }),
+        Some("stop_hook_summary") => out.push(Event::TurnEnded { at }),
         Some("agents_killed") => out.push(Event::AgentsKilled { at }),
         Some("scheduled_task_fire") => out.push(Event::WakeupFired),
         Some("away_summary") => {
@@ -1169,6 +1202,84 @@ pub(crate) mod tests {
                 at: at(6),
                 pending_agents: 0
             }
+        );
+    }
+
+    #[test]
+    fn end_turn_text_closes_the_turn_when_no_turn_duration_follows() {
+        let mut lines = vec![human(0, "Audit it")];
+        lines.extend(launch_agent(1, "t1", "a1", "Launch audit"));
+        lines.push(text(3, "Launched the audit; I'll report when it finishes."));
+        lines.push(system(
+            4,
+            "stop_hook_summary",
+            json!({"hookCount": 1, "hookErrors": [], "preventedContinuation": false}),
+        ));
+        let f = fold(&lines);
+        assert_eq!(
+            f.turn,
+            Turn::Closed {
+                at: at(3),
+                pending_agents: 0
+            }
+        );
+        assert_eq!(open_ids(&f), ["a1"]);
+    }
+
+    #[test]
+    fn stop_hook_summary_alone_closes_the_turn() {
+        let f = fold(&[
+            human(0, "go"),
+            tool_use(1, "t1", "Read", json!({"file_path": "/a/b.rs"})),
+            tool_result(2, "t1", json!({})),
+            system(3, "stop_hook_summary", json!({"hookCount": 1})),
+        ]);
+        assert_eq!(
+            f.turn,
+            Turn::Closed {
+                at: at(3),
+                pending_agents: 0
+            }
+        );
+    }
+
+    #[test]
+    fn a_later_assistant_block_reopens_a_closed_turn() {
+        let mut f = fold(&[
+            human(0, "go"),
+            text(1, "Done."),
+            system(2, "stop_hook_summary", json!({"hookCount": 1})),
+        ]);
+        assert!(matches!(f.turn, Turn::Closed { .. }));
+        let continuation = conv(
+            3,
+            "user",
+            json!({"message": {"role": "user", "content": "Stop hook: keep going"}}),
+        );
+        fold_into(
+            &mut f,
+            &[
+                continuation,
+                tool_use(4, "t2", "Read", json!({"file_path": "/a/b.rs"})),
+            ],
+        );
+        assert_eq!(f.turn, Turn::Open { since: at(4) });
+        fold_into(&mut f, &[text(5, "Now done.")]);
+        assert_eq!(
+            f.turn,
+            Turn::Closed {
+                at: at(5),
+                pending_agents: 0
+            }
+        );
+        fold_into(&mut f, &[turn_duration(6, Some(2))]);
+        assert_eq!(
+            f.turn,
+            Turn::Closed {
+                at: at(6),
+                pending_agents: 2
+            },
+            "turn_duration stays the authoritative close"
         );
     }
 
@@ -1840,12 +1951,13 @@ pub(crate) mod tests {
                         skipped += f.skipped;
                         unknown += f.unknown;
                         println!(
-                            "FULL {} agent={} bash={} monitor={} wakeup={}",
+                            "FULL {} agent={} bash={} monitor={} wakeup={} turn={}",
                             p.display(),
                             f.open_count(BgKind::Agent),
                             f.open_count(BgKind::Shell),
                             f.open_count(BgKind::Monitor),
-                            u8::from(f.wakeup.is_some())
+                            u8::from(f.wakeup.is_some()),
+                            turn_name(&f.turn)
                         );
                         by_sid.insert(
                             p.file_stem().unwrap().to_string_lossy().into_owned(),
@@ -1920,12 +2032,12 @@ pub(crate) mod tests {
                 let tail = Transcript::open(path.clone(), Window::Main).unwrap();
                 let counts = |f: &Facts| {
                     format!(
-                        "agents={} shells={} monitors={} wakeup={} turn={:?}",
+                        "agents={} shells={} monitors={} wakeup={} turn={}",
                         f.open_count(BgKind::Agent),
                         f.open_count(BgKind::Shell),
                         f.open_count(BgKind::Monitor),
                         f.wakeup.is_some(),
-                        std::mem::discriminant(&f.turn)
+                        turn_name(&f.turn)
                     )
                 };
                 println!(
@@ -1943,6 +2055,15 @@ pub(crate) mod tests {
                     }
                 );
             }
+        }
+    }
+
+    fn turn_name(t: &Turn) -> &'static str {
+        match t {
+            Turn::Unknown => "unknown",
+            Turn::Open { .. } => "open",
+            Turn::Closed { .. } => "closed",
+            Turn::Interrupted { .. } => "interrupted",
         }
     }
 

@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn job_ids_that_could_read_as_flags_or_paths_are_rejected() {
-        assert_eq!(JobId::parse("9b3323e1"), Some(JobId("9b3323e1".into())));
+        assert_eq!(JobId::parse("0a1b2c3d"), Some(JobId("0a1b2c3d".into())));
         for bad in ["--help", "../x", "", "a b"] {
             assert_eq!(JobId::parse(bad), None, "{bad}");
         }
@@ -755,7 +755,7 @@ mod tests {
     #[test]
     fn user_key_round_trips() {
         for k in [
-            UserKey::Job(JobId("9b3323e1".into())),
+            UserKey::Job(JobId("0a1b2c3d".into())),
             UserKey::Session(SessionId("u-1".into())),
         ] {
             assert_eq!(UserKey::decode(&k.encode()), Some(k));

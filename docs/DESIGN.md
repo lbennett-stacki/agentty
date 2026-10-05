@@ -1,4 +1,4 @@
-# agentically: design
+# agentty: design
 
 A read-only, tmux-native dashboard over every live Claude Code session on this Mac. This document explains the shape of the code and why it has that shape. It is the synthesized result of a three-candidate architecture arena (`.work/arch/`, gitignored): candidate X (opus) is the base, with grafts from Y (fable) and Z (sonnet) listed under [Synthesis decision](#synthesis-decision).
 
@@ -16,7 +16,7 @@ Show every live Claude Code session in one grouped list with a status that tells
 ## What the user sees
 
 ```
- agentically  7 live · 1 needs you · 1 parked                                      ? help
+ agentty  7 live · 1 needs you · 1 parked                                      ? help
  jnj-web ─────────────────────────────────────────────────────────────────────────────── 4
  ▲ auth-race  Fix token refresh race in session middleware   feat/auth-race #4812  412k   3m
      permission prompt · Bash: Run migration against staging
@@ -29,9 +29,9 @@ Show every live Claude Code session in one grouped list with a status that tells
      │  └─ ✓ 2 finished
      ├─ ◉ monitor  Watch CI for PR #4790                                14m
      └─ ✓ 4 finished
- ○ fees  Polymarket fee logic                                 bg · main             64k   1h
+ ○ fees  Rework fee rounding                                   bg · main             64k   1h
      Fee logic done; client-side & policy next
- agentically ─────────────────────────────────────────────────────────────────────────── 1
+ agentty ─────────────────────────────────────────────────────────────────────────── 1
  ? Claude agents TUI replacement                              personal · main  277k $3.41  5m
      Want me to wire the statusline tee now?
  finished · 24h ──────────────────────────────────────────────────────────────────────── 1
@@ -44,7 +44,7 @@ Glyphs: `▲` NeedsYou (red); `●` Working (green); `◐` Parked (yellow); `?` 
 
 Keys: `j`/`k`/`↓`/`↑`/`g`/`G` move; `l`/`→`/`space` expand, `h`/`←` collapse; `Enter` open; `tab`/`p` detail; `r` label; `m` move to group (`-` returns to the automatic group); `n` new `claude` in a new tmux window in the row's cwd, config dir and group, with an optional name; `/` filter; `?` help plus diagnostics; `q`/`Esc` quit.
 
-Popup flow (`bind a display-popup -E -w 90% -h 85% -T ' agents ' 'agentically --popup'`): a cold start reads only registries and tail windows within a byte budget. `Enter` on a pane row emits `Effect::Jump`. The shell runs `tmux list-panes -t %N` as the existence check, then `switch-client -t %N`, and feeds back `Outcome::Jumped`. In popup mode `update` answers with `Effect::Quit`, the process exits, and `-E` closes the popup over the target pane. A failed jump shows a flash and keeps the popup open.
+Popup flow (`bind a display-popup -E -w 90% -h 85% -T ' agents ' 'agentty --popup'`): a cold start reads only registries and tail windows within a byte budget. `Enter` on a pane row emits `Effect::Jump`. The shell runs `tmux list-panes -t %N` as the existence check, then `switch-client -t %N`, and feeds back `Outcome::Jumped`. In popup mode `update` answers with `Effect::Quit`, the process exits, and `-E` closes the popup over the target pane. A failed jump shows a flash and keeps the popup open.
 
 ## Shape
 
@@ -62,7 +62,7 @@ Eleven flat files. Input reaches pixels in at most three hops.
 | `sidecars` | tasks, statusline tee, team configs, repo roots | `Task`, `Statusline`, `Team`, `repo_root` |
 | `world` | every cursor and cache; stat-gated refresh; `Host`; GC | `SessionView`s, `ExitedView`s, `Diagnostic`s |
 | `derive` | every product decision: status table, parked counts, title, now-line, tree, auto-group, Enter target | `Snapshot` |
-| `user_state` | `~/.config/agentically/state.toml`, `rebind` | `UserState`, `Store`, `Op`s |
+| `user_state` | `~/.config/agentty/state.toml`, `rebind` | `UserState`, `Store`, `Op`s |
 | `ui` | view state, pure `layout -> Vec<Line>`, pure key reducer, renderer | `Vec<Effect>`, frames |
 | `main` | the loop, feeder threads, `execute(Effect)`, `TmuxCmd::argv` | nothing |
 
@@ -255,15 +255,15 @@ Fixtures live in `tests/fixtures/`. They are cut from live files named in GROUND
 
 These run on the dev machine, read-only, in a scratch tmux session so nothing the user is looking at moves. Steps 2 to 7 are `scripts/e2e.sh`, rerunnable, exit code 0 on pass, printing the captured pane on failure.
 
-1. `tmux new-session -d -s agt-test -x 160 -y 50 'agentically'`; wait 2 s.
+1. `tmux new-session -d -s agt-test -x 160 -y 50 'agentty'`; wait 2 s.
 2. `tmux capture-pane -p -t agt-test` and assert: one group header per expected repo; every live, non-hidden `sessions/*.json` appears exactly once; no line matches the token regex used by `SafeText::redact`; every row the registry marks `waiting` carries `▲` and its `waitingFor` text.
 3. Cross-check against the registry read directly with `jq`: the set of pids rendered equals the set of live, non-hidden pids (compare counts per config dir in the header).
 4. Status transitions: pick a row whose registry says `shell`; assert `◐` and `waiting on … shell`. Pick one that says `busy` with a recent `turn_duration` carrying `pendingBackgroundAgentCount`; assert `◐` and the agent count.
 5. Keys: `tmux send-keys -t agt-test j j l`; capture; assert the third row is expanded. `send-keys /` then `fee` then `Enter`; assert only matching rows remain. `send-keys Esc` restores.
 6. Label persistence: `send-keys r`, type `e2e`, `Enter`; assert the label on the row and in `state.toml` under that session id with an `anchor` table; restart the binary in the same tmux session; assert the label is still rendered. Then remove the label.
-7. Jump (popup mode): in a second scratch window run `agentically --popup`, move to a row whose open target is a pane, `send-keys Enter`; assert via `tmux display -p '#{pane_id}'` on the client that the active pane changed to the registry's pane and that the popup process exited.
+7. Jump (popup mode): in a second scratch window run `agentty --popup`, move to a row whose open target is a pane, `send-keys Enter`; assert via `tmux display -p '#{pane_id}'` on the client that the active pane changed to the registry's pane and that the popup process exited.
 8. Liveness: start a throwaway `sleep` and write a fake `sessions/<pid>.json` in a fixture config dir passed via `CLAUDE_CONFIG_DIR` (never under `~/.claude*`); kill the sleep; assert the row disappears within 2 s. This is the only e2e step that writes, and only to the fixture dir.
-9. Cost: run with `AGENTICALLY_TRACE=1` for 10 s with 20 sessions and assert zero `read` calls on `*.jsonl` after the first refresh on a quiet tick, cold start under 150 ms, and p99 steady refresh under 5 ms.
+9. Cost (planned, no trace flag exists yet): a quiet tick should read no `*.jsonl` bytes. Measured on 2.1.289 with 8 to 13 sessions, a steady refresh takes 27 to 31 ms, of which `ps` is 21 to 27 ms, and a cold start fills in about 0.5 s.
 10. `tmux kill-session -t agt-test`.
 
 ## Open questions and risks

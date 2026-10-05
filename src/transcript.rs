@@ -1172,8 +1172,7 @@ pub(crate) mod tests {
         f.open_bg.keys().map(|k| k.0.as_str()).collect()
     }
     pub(crate) fn scratch(name: &str) -> PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("agentically-test-{}-{name}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("agentty-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

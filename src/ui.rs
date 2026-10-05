@@ -761,7 +761,7 @@ fn header(snap: &Snapshot, width: u16) -> TLine<'static> {
         .count();
     let count = |rank| snap.rows.iter().filter(|r| r.status.rank() == rank).count();
     let mut left = vec![
-        Span::styled(" agentically", Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(" agentty", Style::new().add_modifier(Modifier::BOLD)),
         Span::raw(format!("  {live} live")),
     ];
     for (rank, what, color) in [
@@ -1355,7 +1355,7 @@ mod tests {
         );
         e.key = RowKey::Exited {
             dir: ConfigDir("/h/.claude".into()),
-            job: JobId("9b3323e1".into()),
+            job: JobId("0a1b2c3d".into()),
         };
         let mut user = UserState::default();
         user.groups.push(GroupName("empty".into()));
@@ -1694,7 +1694,7 @@ mod tests {
         let dir = ConfigDir("/h/.claude-personal".into());
         r.open = OpenTarget::Attach {
             dir: dir.clone(),
-            job: JobId("9b3323e1".into()),
+            job: JobId("0a1b2c3d".into()),
             title: "fees".into(),
         };
         let s = snap(vec![r]);
@@ -1708,7 +1708,7 @@ mod tests {
             fx,
             [Effect::Attach {
                 dir,
-                job: JobId("9b3323e1".into()),
+                job: JobId("0a1b2c3d".into()),
                 title: "fees".into()
             }]
         );
@@ -1971,7 +1971,7 @@ mod tests {
         let text = buffer_text(term.backend().buffer());
         let lines: Vec<&str> = text.lines().collect();
         assert!(
-            lines[0].starts_with(" agentically  3 live · 1 needs you · 1 parked"),
+            lines[0].starts_with(" agentty  3 live · 1 needs you · 1 parked"),
             "{text}"
         );
         assert!(lines[0].ends_with("⚠ 1  ? help"), "{text}");

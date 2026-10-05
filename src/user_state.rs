@@ -155,7 +155,7 @@ impl Store {
     }
 
     pub fn default_path(home: &Path) -> PathBuf {
-        home.join(".config/agentically/state.toml")
+        home.join(".config/agentty/state.toml")
     }
 
     pub fn reload_if_changed(&mut self) -> anyhow::Result<bool> {
@@ -333,7 +333,7 @@ mod tests {
             anchor: anchor(1),
         });
         let ops = [
-            label(UserKey::Job(JobId("9b3323e1".into())), "fees"),
+            label(UserKey::Job(JobId("0a1b2c3d".into())), "fees"),
             Op::SetLabel {
                 key: skey("a"),
                 label: None,
@@ -494,7 +494,7 @@ mod tests {
             session: sid("91c7"),
             anchor: anchor(41213),
         });
-        s.apply(&label(UserKey::Job(JobId("9b3323e1".into())), "fees"));
+        s.apply(&label(UserKey::Job(JobId("0a1b2c3d".into())), "fees"));
         let text = encode(&s);
         assert!(text.contains("version = 1"), "{text}");
         assert!(!text.contains("\"\""), "{text}");

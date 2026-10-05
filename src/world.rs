@@ -31,7 +31,7 @@ impl Roots {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from);
         Ok(Roots {
-            cache: home.join(".cache").join("agentically"),
+            cache: home.join(".cache").join("agentty"),
             home,
             env_config_dir,
         })
@@ -754,7 +754,7 @@ pub(crate) mod tests {
             let roots = Roots {
                 home: home.path().to_path_buf(),
                 env_config_dir: None,
-                cache: home.path().join(".cache/agentically"),
+                cache: home.path().join(".cache/agentty"),
             };
             let world = World::new(
                 roots,
@@ -1066,7 +1066,7 @@ pub(crate) mod tests {
         );
         f.home.write(".claude/tasks/s-80/.lock", b"");
         f.home.write(".claude/tasks/s-80/1.json.lock", b"");
-        f.home.write(".cache/agentically/statusline/s-80.json", br#"{"context_window":{"used_percentage":42.5,"context_window_size":1000000},"cost":{"total_cost_usd":1.25}}"#);
+        f.home.write(".cache/agentty/statusline/s-80.json", br#"{"context_window":{"used_percentage":42.5,"context_window_size":1000000},"cost":{"total_cost_usd":1.25}}"#);
         f.world.refresh(Wake::Doorbell);
         {
             let v = f.world.sessions().next().unwrap();

@@ -45,10 +45,10 @@ const DUMP_MAX_REFRESHES: usize = 20;
 
 const DUMP_WIDTH: u16 = 160;
 
-const USAGE: &str = "usage: agentically [--popup] [--state <path>] [--dump]
+const USAGE: &str = "usage: agentty [--popup] [--state <path>] [--dump]
 
   --popup         quit after a successful jump (for tmux display-popup -E)
-  --state <path>  user state file (default ~/.config/agentically/state.toml)
+  --state <path>  user state file (default ~/.config/agentty/state.toml)
   --dump          print one frame as plain text and exit (no TTY needed)
 ";
 
@@ -450,7 +450,7 @@ mod tests {
             name: "docs sweep".into(),
             cwd: None,
             config_dir: dir(),
-            run: ClaudeRun::Attach(JobId("9b3323e1".into())),
+            run: ClaudeRun::Attach(JobId("0a1b2c3d".into())),
         };
         assert_eq!(
             cmd.argv(),
@@ -462,7 +462,7 @@ mod tests {
                 "CLAUDE_CONFIG_DIR=/Users/u/.claude-personal",
                 "claude",
                 "attach",
-                "9b3323e1"
+                "0a1b2c3d"
             ]
         );
     }

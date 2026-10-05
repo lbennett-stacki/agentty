@@ -867,14 +867,14 @@ mod tests {
         RegEntry {
             kind: ProcKind::Bg,
             pane: None,
-            job: Some(JobId("9b3323e1".into())),
+            job: Some(JobId("0a1b2c3d".into())),
             ..reg(status)
         }
     }
 
     fn job() -> Job {
         Job {
-            id: JobId("9b3323e1".into()),
+            id: JobId("0a1b2c3d".into()),
             session_id: None,
             state: JobState::Working,
             tempo: Some(Tempo::Active),
@@ -1921,7 +1921,7 @@ mod tests {
         let fx = Fx::new(bg_reg(RegStatus::Busy));
         let expected = OpenTarget::Attach {
             dir: fx.dir.clone(),
-            job: JobId("9b3323e1".into()),
+            job: JobId("0a1b2c3d".into()),
             title: "t".into(),
         };
         assert_eq!(open_target(&fx.view(), &SafeText::ours("t")), expected);
@@ -2054,7 +2054,7 @@ mod tests {
         assert_eq!(
             keys,
             [
-                &UserKey::Job(JobId("9b3323e1".into())),
+                &UserKey::Job(JobId("0a1b2c3d".into())),
                 &UserKey::Job(JobId("deadbeef".into()))
             ]
         );

@@ -769,13 +769,11 @@ pub fn open_target(v: &SessionView<'_>, title: &SafeText) -> OpenTarget {
     }
 }
 
+// `World::view` attaches a team only when `Team::includes` says the session leads it or sits
+// in one of its panes, so a team on the view is the group.
 pub fn auto_group(v: &SessionView<'_>) -> AutoGroup {
     if let Some(team) = v.team {
-        let lead = team.lead.as_ref() == Some(&v.reg.session_id);
-        let member = v.reg.pane.is_some() && team.members.iter().any(|m| m.pane == v.reg.pane);
-        if lead || member {
-            return AutoGroup::Team(team.name.clone());
-        }
+        return AutoGroup::Team(team.name.clone());
     }
     match v.repo {
         Some(root) => AutoGroup::Repo(root.to_path_buf()),
@@ -1973,29 +1971,34 @@ mod tests {
             auto_group(&fx.view()),
             AutoGroup::Repo(PathBuf::from("/work/repo"))
         );
-        let member = TeamMember {
-            name: "w".into(),
-            pane: PaneId::parse("%7"),
-            active: true,
-        };
         fx.team = Some(Team {
             name: SafeText::ours("session-0f1e2d3c"),
-            lead: None,
-            members: vec![member],
-        });
-        assert_eq!(
-            auto_group(&fx.view()),
-            AutoGroup::Team(SafeText::ours("session-0f1e2d3c"))
-        );
-        fx.team = Some(Team {
-            name: SafeText::ours("other"),
             lead: None,
             members: Vec::new(),
         });
         assert_eq!(
             auto_group(&fx.view()),
-            AutoGroup::Repo(PathBuf::from("/work/repo"))
+            AutoGroup::Team(SafeText::ours("session-0f1e2d3c"))
         );
+    }
+
+    #[test]
+    fn a_team_includes_its_lead_and_its_pane_members_only() {
+        let team = Team {
+            name: SafeText::ours("t"),
+            lead: Some(SessionId("lead".into())),
+            members: vec![TeamMember {
+                name: "w".into(),
+                pane: PaneId::parse("%7"),
+                active: true,
+            }],
+        };
+        let pane = PaneId::parse("%7");
+        let other = PaneId::parse("%8");
+        assert!(team.includes(&SessionId("lead".into()), None));
+        assert!(team.includes(&SessionId("member".into()), pane.as_ref()));
+        assert!(!team.includes(&SessionId("outsider".into()), other.as_ref()));
+        assert!(!team.includes(&SessionId("outsider".into()), None));
     }
 
     #[test]

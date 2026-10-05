@@ -601,7 +601,7 @@ impl World {
                 .teams
                 .iter()
                 .find(|(path, (_, team))| {
-                    path.starts_with(&dir.0) && team.lead.as_ref() == Some(&reg.session_id)
+                    path.starts_with(&dir.0) && team.includes(&reg.session_id, reg.pane.as_ref())
                 })
                 .map(|(_, (_, team))| team),
             repo: self.repos.get(&reg.cwd).and_then(|r| r.as_deref()),
@@ -1110,14 +1110,31 @@ pub(crate) mod tests {
         f.home.mkdir("src/demo/sub");
         let cwd = repo.join("sub");
         f.session(".claude", 90, "lead-sid", json!({"cwd": cwd}));
-        f.alive(90);
+        f.session(".claude", 91, "member-sid", json!({"tmux": "0:@3.%12"}));
+        f.session(".claude", 92, "outsider-sid", json!({"tmux": "0:@3.%13"}));
+        for pid in [90, 91, 92] {
+            f.alive(pid);
+        }
         f.home.write(
             ".claude/teams/session-lead/config.json",
             br#"{"name":"session-lead","leadSessionId":"lead-sid","members":[{"name":"w1","tmuxPaneId":"%12","isActive":true}]}"#,
         );
         f.world.refresh(Wake::Doorbell);
+        let teams: Vec<(u32, Option<&str>)> = f
+            .world
+            .sessions()
+            .map(|v| (v.reg.pid.0, v.team.map(|t| t.name.as_str())))
+            .collect();
+        assert_eq!(
+            teams,
+            [
+                (90, Some("session-lead")),
+                (91, Some("session-lead")),
+                (92, None)
+            ],
+            "the lead and the pane member get the team, the outsider does not"
+        );
         let v = f.world.sessions().next().unwrap();
-        assert_eq!(v.team.map(|t| t.name.as_str()), Some("session-lead"));
         assert_eq!(
             v.repo,
             Some(std::fs::canonicalize(&repo).unwrap().as_path())

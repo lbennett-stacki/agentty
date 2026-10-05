@@ -107,6 +107,14 @@ pub struct Team {
     pub members: Vec<TeamMember>,
 }
 
+impl Team {
+    /// The lead session, or a split-pane member found by its tmux pane (GROUNDING 3.11).
+    pub fn includes(&self, session: &SessionId, pane: Option<&PaneId>) -> bool {
+        self.lead.as_ref() == Some(session)
+            || pane.is_some_and(|p| self.members.iter().any(|m| m.pane.as_ref() == Some(p)))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TeamMember {
     pub name: String,

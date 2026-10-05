@@ -127,7 +127,7 @@ pub fn live_row(v: SessionView<'_>, now: At) -> Row {
         since,
         meta: meta(&v),
         tree: tree(&v, &agents, now),
-        detail: detail(&v, now),
+        detail: detail(&v, &agents, now),
         open: open_target(&v, &title),
         title,
         status,
@@ -284,7 +284,8 @@ pub fn parked(
                     Count::AtLeast(n)
                 }
             };
-            let fold = |k| v.facts.map_or(0, |f| f.open_count(k));
+            let side = sidecar_work(v, agents);
+            let fold = |k| v.facts.map_or(0, |f| f.open_count(k)) + side.count(k);
             let pending = match v.facts.map(|f| f.turn) {
                 Some(Turn::Closed { pending_agents, .. }) => pending_agents,
                 _ => 0,
@@ -293,11 +294,12 @@ pub fn parked(
                 .iter()
                 .filter(|(_, s, _)| *s == NodeState::Running)
                 .count() as u16;
-            let agents_n = fold(BgKind::Agent).max(running).max(pending);
+            let agents_n = v.facts.map_or(0, |f| f.open_count(BgKind::Agent));
+            let agents_n = agents_n.max(running).max(pending);
             (
                 count(agents_n, complete || v.subagents.is_some()),
-                count(fold(BgKind::Shell), complete),
-                count(fold(BgKind::Monitor), complete),
+                count(fold(BgKind::Shell), complete && side.complete),
+                count(fold(BgKind::Monitor), complete && side.complete),
                 0,
             )
         }
@@ -417,28 +419,7 @@ fn tool_line(name: &str, summary: &SafeText) -> SafeText {
 pub fn tree(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> Tree {
     let known: HashSet<&AgentId> = agents.iter().map(|(m, _, _)| &m.id).collect();
     let mut t = agent_level(v, agents, &known, None, 0);
-    for item in roster(v) {
-        if item.kind == Work::Agent && known.contains(&AgentId(item.id.0.clone())) {
-            continue;
-        }
-        t.live.push(Node {
-            id: item.id,
-            kind: match item.kind {
-                Work::Agent => NodeKind::Agent {
-                    agent_type: "agent".to_owned(),
-                    model: None,
-                },
-                Work::Shell => NodeKind::Shell,
-                Work::Monitor => NodeKind::Monitor,
-                Work::Workflow => NodeKind::Workflow,
-            },
-            state: NodeState::Running,
-            label: item.label.clone(),
-            since: item.since.unwrap_or(v.reg.status_since),
-            now: None,
-            children: Tree::default(),
-        });
-    }
+    t.live.extend(leaves(v, roster(v), &known));
     if let Some(at) = future_wakeup(v.facts, now) {
         t.live.push(Node {
             id: TaskId("wakeup".to_owned()),
@@ -454,6 +435,36 @@ pub fn tree(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> Tree {
         });
     }
     t
+}
+
+/// Leaf nodes for open work that has no meta file of its own: shells, monitors, workflows,
+/// and agents the tree does not already place from their meta.
+fn leaves<'a>(
+    v: &SessionView<'_>,
+    items: impl IntoIterator<Item = RosterItem<'a>>,
+    known: &HashSet<&AgentId>,
+) -> Vec<Node> {
+    items
+        .into_iter()
+        .filter(|item| item.kind != Work::Agent || !known.contains(&AgentId(item.id.0.clone())))
+        .map(|item| Node {
+            id: item.id,
+            kind: match item.kind {
+                Work::Agent => NodeKind::Agent {
+                    agent_type: "agent".to_owned(),
+                    model: None,
+                },
+                Work::Shell => NodeKind::Shell,
+                Work::Monitor => NodeKind::Monitor,
+                Work::Workflow => NodeKind::Workflow,
+            },
+            state: NodeState::Running,
+            label: item.label.clone(),
+            since: item.since.unwrap_or(v.reg.status_since),
+            now: None,
+            children: Tree::default(),
+        })
+        .collect()
 }
 
 // Real trees are at most two agents deep. The bound also stops a malformed self-parent cycle.
@@ -480,6 +491,12 @@ fn agent_level(
             t.finished += 1;
             continue;
         }
+        let mut children = agent_level(v, agents, known, Some(&meta.id), depth + 1);
+        if v.job.is_none()
+            && let Some(side) = sidecar
+        {
+            children.live.extend(leaves(v, open_items(side), known));
+        }
         t.live.push(Node {
             id: TaskId::from(&meta.id),
             kind: NodeKind::Agent {
@@ -490,7 +507,7 @@ fn agent_level(
             label: meta.description.clone(),
             since: agent_started(v, agents, &meta.id, sidecar),
             now: sidecar.and_then(doing),
-            children: agent_level(v, agents, known, Some(&meta.id), depth + 1),
+            children,
         });
     }
     t
@@ -567,20 +584,62 @@ fn roster<'a>(v: &SessionView<'a>) -> Vec<RosterItem<'a>> {
             })
             .collect();
     }
-    v.facts
-        .into_iter()
-        .flat_map(|f| &f.open_bg)
-        .map(|(id, b)| RosterItem {
-            id: id.clone(),
-            kind: match b.kind {
-                BgKind::Agent => Work::Agent,
-                BgKind::Shell => Work::Shell,
-                BgKind::Monitor => Work::Monitor,
-            },
-            label: &b.label,
-            since: Some(b.started),
-        })
-        .collect()
+    v.facts.into_iter().flat_map(open_items).collect()
+}
+
+fn open_items(f: &Facts) -> impl Iterator<Item = RosterItem<'_>> {
+    f.open_bg.iter().map(|(id, b)| RosterItem {
+        id: id.clone(),
+        kind: match b.kind {
+            BgKind::Agent => Work::Agent,
+            BgKind::Shell => Work::Shell,
+            BgKind::Monitor => Work::Monitor,
+        },
+        label: &b.label,
+        since: Some(b.started),
+    })
+}
+
+/// Work launched inside running subagents. Background shells and monitors started by an agent
+/// are recorded only in its sidecar (677 of the launches on this machine), never in the parent
+/// transcript, while the registry's `shell` status counts them all the same.
+struct SidecarWork<'a> {
+    items: Vec<RosterItem<'a>>,
+    /// False when a running agent's sidecar was not read (deferred, or budgeted out) or its
+    /// window missed the file's start, so a count over `items` is a lower bound.
+    complete: bool,
+}
+
+impl SidecarWork<'_> {
+    fn count(&self, kind: BgKind) -> u16 {
+        let want = match kind {
+            BgKind::Agent => Work::Agent,
+            BgKind::Shell => Work::Shell,
+            BgKind::Monitor => Work::Monitor,
+        };
+        self.items.iter().filter(|i| i.kind == want).count() as u16
+    }
+}
+
+fn sidecar_work<'a>(v: &SessionView<'_>, agents: &[AgentView<'a>]) -> SidecarWork<'a> {
+    let mut work = SidecarWork {
+        items: Vec::new(),
+        complete: true,
+    };
+    if v.job.is_some() {
+        return work;
+    }
+    for (_, _, side) in agents.iter().filter(|(_, s, _)| *s == NodeState::Running) {
+        match side {
+            Some(f) => {
+                work.complete &= f.horizon.from_start;
+                work.items
+                    .extend(open_items(f).filter(|i| i.kind != Work::Agent));
+            }
+            None => work.complete = false,
+        }
+    }
+    work
 }
 
 pub fn meta(v: &SessionView<'_>) -> Meta {
@@ -644,10 +703,11 @@ fn prs(facts: Option<&Facts>, job: Option<&Job>) -> Vec<u32> {
     out
 }
 
-pub fn detail(v: &SessionView<'_>, now: At) -> Detail {
+pub fn detail(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> Detail {
     let facts = v.facts;
     let mut pending: Vec<SafeText> = roster(v)
         .into_iter()
+        .chain(sidecar_work(v, agents).items)
         .map(|item| {
             let kind = match item.kind {
                 Work::Agent => "agent",
@@ -1284,6 +1344,120 @@ mod tests {
         assert_eq!(fx.parked().shells(), Count::Exact(2));
     }
 
+    fn whole(f: &mut Facts) {
+        f.horizon = Horizon {
+            from_start: true,
+            first_at: None,
+        };
+    }
+
+    #[test]
+    fn shells_launched_inside_running_subagents_count_and_are_exact_only_when_fully_read() {
+        let fx = Fx::new(reg(RegStatus::Shell)).with_facts(|f| {
+            whole(f);
+            f.open_bg
+                .insert(TaskId("bmain0001".into()), bg(BgKind::Shell, "dev server"));
+        });
+        let mut side = Facts::default();
+        whole(&mut side);
+        side.open_bg
+            .insert(TaskId("bside0002".into()), bg(BgKind::Shell, "watch CI"));
+        side.open_bg.insert(
+            TaskId("bside0003".into()),
+            bg(BgKind::Monitor, "watch deploy"),
+        );
+        let (m1, m2) = (agent_meta("a1", None), agent_meta("a2", None));
+
+        let read: Vec<AgentView<'_>> = vec![(&m1, NodeState::Running, Some(&side))];
+        let p = parked(&fx.view(), &read, true, T0);
+        assert_eq!(
+            (p.shells(), p.monitors()),
+            (Count::Exact(2), Count::Exact(1))
+        );
+        assert_eq!(describe_parked(&p), "2 shells, 1 monitor");
+
+        let unread: Vec<AgentView<'_>> = vec![
+            (&m1, NodeState::Running, Some(&side)),
+            (&m2, NodeState::Running, None),
+        ];
+        let p = parked(&fx.view(), &unread, true, T0);
+        assert_eq!(
+            (p.shells(), p.monitors()),
+            (Count::AtLeast(2), Count::AtLeast(1)),
+            "a running agent whose sidecar was not read makes the counts lower bounds"
+        );
+
+        let mut partial = side.clone();
+        partial.horizon = Horizon {
+            from_start: false,
+            first_at: Some(at(-10)),
+        };
+        let windowed: Vec<AgentView<'_>> = vec![(&m1, NodeState::Running, Some(&partial))];
+        assert_eq!(
+            parked(&fx.view(), &windowed, true, T0).shells(),
+            Count::AtLeast(2),
+            "a sidecar window that missed the file's start is a lower bound too"
+        );
+
+        let finished: Vec<AgentView<'_>> = vec![(
+            &m1,
+            NodeState::Finished(TaskOutcome::Completed),
+            Some(&side),
+        )];
+        assert_eq!(
+            parked(&fx.view(), &finished, true, T0).shells(),
+            Count::Exact(1),
+            "a finished agent's stale sidecar adds nothing"
+        );
+    }
+
+    #[test]
+    fn sidecar_shells_hang_under_their_agent_in_the_tree_and_join_the_pending_list() {
+        let fx = Fx::new(reg(RegStatus::Shell)).with_facts(|f| {
+            f.open_bg
+                .insert(TaskId("a1".into()), bg(BgKind::Agent, "audit"));
+        });
+        let mut side = Facts::default();
+        side.open_bg
+            .insert(TaskId("bside0002".into()), bg(BgKind::Shell, "watch CI"));
+        side.last_tool = Some(tool("Bash", "watch CI", true, at(-1)));
+        let m = agent_meta("a1", None);
+        let agents: Vec<AgentView<'_>> = vec![(&m, NodeState::Running, Some(&side))];
+        let t = tree(&fx.view(), &agents, T0);
+        assert_eq!(t.live.len(), 1);
+        let leaves: Vec<(&str, &NodeKind, &str)> = t.live[0]
+            .children
+            .live
+            .iter()
+            .map(|n| (n.id.0.as_str(), &n.kind, n.label.as_str()))
+            .collect();
+        assert_eq!(leaves, [("bside0002", &NodeKind::Shell, "watch CI")]);
+        assert_eq!(t.live[0].children.live[0].since, at(-30));
+        let d = detail(&fx.view(), &agents, T0);
+        assert_eq!(
+            d.pending,
+            [
+                SafeText::ours("agent · audit"),
+                SafeText::ours("shell · watch CI")
+            ]
+        );
+
+        let mut bg_fx = Fx::new(bg_reg(RegStatus::Shell));
+        bg_fx.job = Some(Job {
+            fan: vec![
+                fan("a1", FanKind::Agent, false),
+                fan("bside0002", FanKind::Shell, false),
+            ],
+            ..job()
+        });
+        let t = tree(&bg_fx.view(), &agents, T0);
+        assert!(
+            t.live[0].children.is_empty(),
+            "the fan already lists the shell at the top level"
+        );
+        assert_eq!(detail(&bg_fx.view(), &agents, T0).pending.len(), 2);
+    }
+
     #[test]
     fn describe_parked_pluralises_marks_lower_bounds_and_omits_zeros() {
         let p = Parked::new(Count::Exact(3), Count::AtLeast(1), Count::Exact(0), 1, None).unwrap();
@@ -1827,7 +2001,7 @@ mod tests {
                 status: TaskStatus::Completed,
             },
         ];
-        let d = detail(&fx.view(), T0);
+        let d = detail(&fx.view(), &[], T0);
         assert_eq!(d.open_tasks, [SafeText::ours("write tests")]);
         assert_eq!(d.pending, [SafeText::ours("shell · dev server")]);
         assert_eq!(d.session_id, Some(fx.reg.session_id.clone()));

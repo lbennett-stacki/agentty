@@ -322,13 +322,8 @@ pub fn parked(
 }
 
 pub fn title(v: &SessionView<'_>) -> SafeText {
-    let sid = &v.reg.session_id.0;
-    pick_title(
-        v.facts,
-        v.reg.name.as_ref(),
-        v.job,
-        &sid[..sid.len().min(8)],
-    )
+    let short: String = v.reg.session_id.0.chars().take(8).collect();
+    pick_title(v.facts, v.reg.name.as_ref(), v.job, &short)
 }
 
 fn pick_title(
@@ -1364,6 +1359,14 @@ mod tests {
                 "0f1e2d3c"
             ]
         );
+    }
+
+    #[test]
+    fn title_fallback_takes_eight_characters_of_a_non_ascii_session_id() {
+        let mut fx = Fx::new(reg(RegStatus::Idle));
+        fx.reg.name = None;
+        fx.reg.session_id = SessionId("日本語テスト-0000".into());
+        assert_eq!(title(&fx.view()).as_str(), "日本語テスト-0");
     }
 
     #[test]

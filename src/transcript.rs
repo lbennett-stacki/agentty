@@ -348,7 +348,7 @@ impl Facts {
                     at,
                     is_question,
                 });
-                self.tail_looks_finished = true;
+                self.tail_looks_finished = ends_turn;
                 if ends_turn {
                     self.close_softly(at);
                 }
@@ -1083,6 +1083,13 @@ pub(crate) mod tests {
     fn text(n: u32, s: &str) -> Value {
         text_from(n, s, "claude-opus-5-5", 1000)
     }
+    // Mid-turn narration: a text block whose message carries no stop_reason (2687 of the
+    // 2902 sidecar text blocks that a tool_use follows).
+    fn narration(n: u32, s: &str) -> Value {
+        let mut v = text(n, s);
+        v["message"]["stop_reason"] = Value::Null;
+        v
+    }
     fn system(n: u32, subtype: &str, extra: Value) -> Value {
         let mut v = conv(n, "system", json!({"subtype": subtype}));
         for (k, x) in extra.as_object().unwrap() {
@@ -1648,8 +1655,13 @@ pub(crate) mod tests {
             !f.tail_looks_finished,
             "an ordinary tool_result is mid-work"
         );
-        fold_into(&mut f, &[text(22, "All done.")]);
-        assert!(f.tail_looks_finished);
+        fold_into(&mut f, &[narration(22, "Let me read the file.")]);
+        assert!(
+            !f.tail_looks_finished,
+            "narration before the next tool call is not a finished tail"
+        );
+        fold_into(&mut f, &[text(23, "All done.")]);
+        assert!(f.tail_looks_finished, "an end_turn text block is");
     }
 
     #[test]

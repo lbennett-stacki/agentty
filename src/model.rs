@@ -407,6 +407,18 @@ pub enum NodeState {
     Orphaned,
 }
 
+impl NodeState {
+    /// A state the agent's own file can still change. Running is provisional by definition,
+    /// and AwaitingNotice rests on the sidecar tail alone: a SendMessage, a finishing child or
+    /// the next tool call appends to that file and makes the agent Running again (gotcha 22).
+    pub fn is_provisional(self) -> bool {
+        matches!(
+            self,
+            NodeState::Running | NodeState::Finished(TaskOutcome::AwaitingNotice)
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub rows: Vec<Row>,

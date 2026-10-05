@@ -97,14 +97,14 @@ impl Subagents {
         for id in ids {
             let state = self.state_of(&self.entries[&id].meta, main, alive);
             let has_cursor = self.open.contains_key(&id);
-            match (state, has_cursor) {
-                (NodeState::Running, true) => {
+            match (state.is_provisional(), has_cursor) {
+                (true, true) => {
                     if self.open.get_mut(&id).expect("checked").pump().is_err() {
                         problems.push(Problem::Unreadable);
                         self.drop_cursor(&id);
                     }
                 }
-                (NodeState::Running, false) => {
+                (true, false) => {
                     if budget.saturating_sub(spent) < Window::Sidecar.max_bytes() {
                         problems.push(Problem::Deferred);
                         continue;
@@ -121,8 +121,8 @@ impl Subagents {
                         Err(_) => problems.push(Problem::Unreadable),
                     }
                 }
-                (_, true) => self.drop_cursor(&id),
-                (_, false) => {}
+                (false, true) => self.drop_cursor(&id),
+                (false, false) => {}
             }
         }
         (spent, problems)
@@ -633,6 +633,88 @@ mod tests {
             got.values().all(|(_, open)| !open),
             "no cursors for a dead session"
         );
+    }
+
+    fn sidecar_line(n: u32, agent: &str, message: serde_json::Value) -> Vec<u8> {
+        let ty = if message["role"] == "user" {
+            "user"
+        } else {
+            "assistant"
+        };
+        let mut v = serde_json::json!({
+            "type": ty, "timestamp": at_iso(n), "uuid": format!("{agent}-u{n}"), "agentId": agent,
+            "isSidechain": true, "sessionId": "s-9", "message": message,
+        });
+        if ty == "user" {
+            v["toolUseResult"] = serde_json::json!({});
+        }
+        let mut bytes = serde_json::to_vec(&v).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn at_iso(n: u32) -> String {
+        crate::transcript::tests::ts(n)
+    }
+
+    #[test]
+    fn an_agent_awaiting_its_notice_is_running_again_when_its_sidecar_grows() {
+        let dir = scratch("provisional");
+        let main_path = dir.join("sess.jsonl");
+        fs::write(&main_path, b"").unwrap();
+        let sub = dir.join("sess/subagents");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(
+            sub.join("agent-a1.meta.json"),
+            br#"{"agentType":"Explore","description":"audit","toolUseId":"tu1","spawnDepth":1}"#,
+        )
+        .unwrap();
+        let side = sub.join("agent-a1.jsonl");
+        fs::write(
+            &side,
+            sidecar_line(
+                5,
+                "a1",
+                serde_json::json!({"model": "m", "id": "m5", "role": "assistant", "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "Launched earlier; waiting on a child."}],
+                    "usage": {"input_tokens": 1}}),
+            ),
+        )
+        .unwrap();
+        // The launch predates the main window, so a1 is not in open_bg and has no notice.
+        let main = Facts::default();
+        let mut s = Subagents::new(&main_path);
+        let state = |s: &Subagents| s.agents(&main, true).map(|(_, st, _)| st).next().unwrap();
+        s.refresh(&main, true, 1 << 20);
+        s.refresh(&main, true, 1 << 20);
+        assert_eq!(state(&s), NodeState::Finished(TaskOutcome::AwaitingNotice));
+
+        let mut f = fs::OpenOptions::new().append(true).open(&side).unwrap();
+        for line in [
+            sidecar_line(
+                6,
+                "a1",
+                serde_json::json!({"model": "m", "id": "m6", "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/a/b.rs"}}],
+                    "usage": {"input_tokens": 1}}),
+            ),
+            sidecar_line(
+                7,
+                "a1",
+                serde_json::json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}),
+            ),
+        ] {
+            std::io::Write::write_all(&mut f, &line).unwrap();
+        }
+        drop(f);
+        s.refresh(&main, true, 1 << 20);
+        assert_eq!(
+            state(&s),
+            NodeState::Running,
+            "a tail of tool_use/tool_result is RUNNING (GROUNDING 3.9)"
+        );
+        let (_, _, facts) = s.agents(&main, true).next().unwrap();
+        assert_eq!(facts.unwrap().last_tool.as_ref().unwrap().name, "Read");
     }
 
     #[test]

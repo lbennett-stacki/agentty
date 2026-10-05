@@ -204,6 +204,12 @@ pub fn status(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> (Status
             };
             match facts.turn {
                 Turn::Open { since } => (Status::Working, reg_since.max(since)),
+                // The registry turns busy as the prompt is submitted; the transcript shows the
+                // opener a tick later. Busy dedupes on [status, waitingFor], so a status newer
+                // than the close can only be a new turn, never the parked state continuing.
+                Turn::Closed { at, .. } | Turn::Interrupted { at } if reg_since > at => {
+                    (Status::Working, reg_since)
+                }
                 Turn::Closed { at, .. } | Turn::Interrupted { at } => {
                     (Status::Parked(parked(v, agents, false, now)), at)
                 }
@@ -1061,6 +1067,23 @@ mod tests {
         assert!(matches!(st, Status::Parked(_)), "{st:?}");
         assert_eq!(since, at(90));
         assert_ne!(since, fx.reg.status_since);
+    }
+
+    #[test]
+    fn busy_that_began_after_the_turn_closed_is_working_until_the_prompt_lands() {
+        // The registry turns busy the moment a prompt is submitted; the transcript shows the
+        // opener only on the next tick. Status writes dedupe on [status, waitingFor], so a
+        // status_since newer than the close can only mean a new turn.
+        let mut fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
+            f.turn = Turn::Closed {
+                at: at(90),
+                pending_agents: 0,
+            };
+        });
+        fx.reg.status_since = at(100);
+        assert_eq!(fx.status(), (Status::Working, at(100)));
+        fx.facts.as_mut().unwrap().turn = Turn::Interrupted { at: at(90) };
+        assert_eq!(fx.status(), (Status::Working, at(100)));
     }
 
     #[test]

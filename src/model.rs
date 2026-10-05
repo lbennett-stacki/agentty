@@ -162,16 +162,19 @@ impl SafeText {
         let mut out = String::new();
         let mut redact_next = false;
         for w in &words[first_cmd..] {
-            let token = if redact_next || looks_secret(w) {
-                "…"
-            } else {
-                w
-            };
-            redact_next = w.eq_ignore_ascii_case("bearer");
             if !out.is_empty() {
                 out.push(' ');
             }
-            out.push_str(token);
+            if redact_next || looks_secret(w) {
+                out.push('…');
+            } else if let Some((scheme, host)) = url_userinfo(w) {
+                out.push_str(scheme);
+                out.push('…');
+                out.push_str(host);
+            } else {
+                out.push_str(w);
+            }
+            redact_next = w.eq_ignore_ascii_case("bearer");
         }
         if out.chars().count() > MAX_CHARS {
             out = out.chars().take(MAX_CHARS - 1).collect();
@@ -200,6 +203,17 @@ fn is_env_assignment(word: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// Splits `scheme://user:pass@host/path` into the parts around its userinfo:
+/// (`scheme://`, `@host/path`). None when the word is not a URL with userinfo.
+fn url_userinfo(word: &str) -> Option<(&str, &str)> {
+    let start = word.find("://")? + "://".len();
+    let authority_end = word[start..]
+        .find(['/', '?', '#'])
+        .map_or(word.len(), |i| start + i);
+    let at = start + word[start..authority_end].rfind('@')?;
+    Some((&word[..start], &word[at..]))
 }
 
 fn looks_secret(word: &str) -> bool {
@@ -645,6 +659,21 @@ mod tests {
             shown.as_str(),
             "token … in /Users/me/workspace/some/really/long/path/name.rs"
         );
+    }
+
+    #[test]
+    fn redact_hides_url_userinfo_and_keeps_the_host_and_path() {
+        let db = SafeText::redact(
+            "psql postgres://admin:S3cretPassw0rdWithLotsOfChars1234567@db.internal:5432/app",
+        );
+        assert_eq!(db.as_str(), "psql postgres://…@db.internal:5432/app");
+        let pat = SafeText::redact(
+            "git push https://x-access-token:ghp_0123456789abcdefghijABCDEFGHIJ0123@github.com/o/r.git",
+        );
+        assert_eq!(pat.as_str(), "git push https://…@github.com/o/r.git");
+        assert_eq!(SafeText::redact(db.as_str()), db);
+        let path_at = SafeText::redact("see https://x.io/user@example");
+        assert_eq!(path_at.as_str(), "see https://x.io/user@example");
     }
 
     #[test]

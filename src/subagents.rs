@@ -9,11 +9,11 @@ use crate::transcript::{Facts, FileStamp, Horizon, Notice, Transcript, Window};
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentMeta {
     pub id: AgentId,
-    pub agent_type: String,
+    pub agent_type: SafeText,
     pub description: SafeText,
     pub tool_use: Option<ToolUseId>,
     pub parent: Option<AgentId>,
-    pub model: Option<String>,
+    pub model: Option<SafeText>,
     pub stopped_by_user: bool,
     pub workflow_run: Option<String>,
 }
@@ -37,11 +37,11 @@ pub fn parse_meta(
     let w: WireMeta = serde_json::from_slice(bytes).map_err(|_| Problem::Unparsable)?;
     Ok(AgentMeta {
         id,
-        agent_type: w.agent_type.unwrap_or_default(),
+        agent_type: SafeText::redact(w.agent_type.as_deref().unwrap_or("")),
         description: SafeText::redact(w.description.as_deref().unwrap_or("")),
         tool_use: w.tool_use_id.map(ToolUseId),
         parent: w.parent_agent_id.map(AgentId),
-        model: w.model,
+        model: w.model.as_deref().map(SafeText::redact),
         stopped_by_user: w.stopped_by_user.unwrap_or(false),
         workflow_run,
     })
@@ -331,7 +331,7 @@ mod tests {
     fn meta(id: &str, parent: Option<&str>, stopped: bool) -> AgentMeta {
         AgentMeta {
             id: AgentId(id.into()),
-            agent_type: "Explore".into(),
+            agent_type: SafeText::ours("Explore"),
             description: SafeText::ours("x"),
             tool_use: None,
             parent: parent.map(|p| AgentId(p.into())),

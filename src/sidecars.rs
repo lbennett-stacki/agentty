@@ -102,7 +102,7 @@ pub fn statusline_path(cache_root: &Path, sid: &SessionId) -> PathBuf {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Team {
-    pub name: String,
+    pub name: SafeText,
     pub lead: Option<SessionId>,
     pub members: Vec<TeamMember>,
 }
@@ -133,7 +133,7 @@ struct WireMember {
 pub fn parse_team(bytes: &[u8]) -> Result<Team, Problem> {
     let w: WireTeam = serde_json::from_slice(bytes).map_err(|_| Problem::Unparsable)?;
     Ok(Team {
-        name: nonempty(w.name).ok_or(Problem::MissingField("name"))?,
+        name: SafeText::redact(&nonempty(w.name).ok_or(Problem::MissingField("name"))?),
         lead: nonempty(w.lead_session_id).map(SessionId),
         members: w
             .members
@@ -250,7 +250,7 @@ mod tests {
         ))
         .unwrap();
         let team = parse_team(&bytes).unwrap();
-        assert_eq!(team.name, "session-0a1b2c3d");
+        assert_eq!(team.name.as_str(), "session-0a1b2c3d");
         assert_eq!(
             team.lead,
             Some(SessionId("0a1b2c3d-0000-4000-8000-000000000000".into()))

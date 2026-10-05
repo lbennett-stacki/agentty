@@ -451,7 +451,7 @@ fn leaves<'a>(
             id: item.id,
             kind: match item.kind {
                 Work::Agent => NodeKind::Agent {
-                    agent_type: "agent".to_owned(),
+                    agent_type: SafeText::ours("agent"),
                     model: None,
                 },
                 Work::Shell => NodeKind::Shell,
@@ -672,7 +672,7 @@ pub fn meta(v: &SessionView<'_>) -> Meta {
     }
 }
 
-fn branch(facts: Option<&Facts>, job: Option<&Job>) -> Option<String> {
+fn branch(facts: Option<&Facts>, job: Option<&Job>) -> Option<SafeText> {
     facts
         .and_then(|f| {
             f.branch
@@ -682,14 +682,14 @@ fn branch(facts: Option<&Facts>, job: Option<&Job>) -> Option<String> {
         .or_else(|| job.and_then(|j| j.worktree_branch.clone()))
 }
 
-fn worktree(facts: Option<&Facts>, job: Option<&Job>) -> Option<String> {
+fn worktree(facts: Option<&Facts>, job: Option<&Job>) -> Option<SafeText> {
     facts
         .and_then(|f| f.worktree.as_ref())
         .map(|w| w.name.clone())
         .or_else(|| {
             job.and_then(|j| j.worktree_path.as_ref())
                 .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().into_owned())
+                .map(|n| SafeText::redact(&n.to_string_lossy()))
         })
 }
 
@@ -925,11 +925,11 @@ mod tests {
     fn agent_meta(id: &str, parent: Option<&str>) -> AgentMeta {
         AgentMeta {
             id: AgentId(id.into()),
-            agent_type: "Explore".into(),
+            agent_type: SafeText::ours("Explore"),
             description: SafeText::redact(&format!("agent {id}")),
             tool_use: None,
             parent: parent.map(|p| AgentId(p.into())),
-            model: Some("sonnet".into()),
+            model: Some(SafeText::ours("sonnet")),
             stopped_by_user: false,
             workflow_run: None,
         }
@@ -1693,15 +1693,15 @@ mod tests {
         fx.dir = ConfigDir(PathBuf::from("/home/u/.claude-personal"));
         fx.job = Some(Job {
             prs: vec![4812, 4900],
-            worktree_branch: Some("docs/onboarding".into()),
+            worktree_branch: Some(SafeText::ours("docs/onboarding")),
             worktree_path: Some(PathBuf::from("/work/repo/.claude/worktrees/docs")),
             remote_control: true,
             ..job()
         });
         let m = meta(&fx.view());
         assert_eq!(m.prs, [4790, 4812, 4900]);
-        assert_eq!(m.branch.as_deref(), Some("docs/onboarding"));
-        assert_eq!(m.worktree.as_deref(), Some("docs"));
+        assert_eq!(m.branch, Some(SafeText::ours("docs/onboarding")));
+        assert_eq!(m.worktree, Some(SafeText::ours("docs")));
         assert!(m.remote_control && m.bg);
         assert_eq!(m.dir_tag, "personal");
     }
@@ -1897,6 +1897,51 @@ mod tests {
     }
 
     #[test]
+    fn branch_worktree_agent_type_model_and_team_name_are_redacted_on_the_way_to_the_row() {
+        const TOKEN: &str = "ghp_0123456789abcdefghijABCDEFGHIJ0123";
+        let mut fx = Fx::new(reg(RegStatus::Busy)).with_facts(|f| {
+            f.branch = Some(SafeText::redact(TOKEN));
+            f.worktree = Some(crate::transcript::Worktree {
+                path: PathBuf::from("/w/x"),
+                name: SafeText::redact(TOKEN),
+                branch: Some(SafeText::redact(TOKEN)),
+            });
+        });
+        fx.team = Some(Team {
+            name: SafeText::redact(TOKEN),
+            lead: Some(fx.reg.session_id.clone()),
+            members: Vec::new(),
+        });
+        let m = AgentMeta {
+            agent_type: SafeText::redact(TOKEN),
+            model: Some(SafeText::redact(TOKEN)),
+            ..agent_meta("a1", None)
+        };
+        let agents: Vec<AgentView<'_>> = vec![(&m, NodeState::Running, None)];
+        let shown = format!(
+            "{:?} {:?} {:?}",
+            meta(&fx.view()),
+            tree(&fx.view(), &agents, T0),
+            auto_group(&fx.view())
+        );
+        assert!(!shown.contains(TOKEN), "{shown}");
+        let job_fx = Fx::new(bg_reg(RegStatus::Busy));
+        let j = Job {
+            worktree_branch: Some(SafeText::redact(TOKEN)),
+            worktree_path: Some(PathBuf::from(format!("/w/{TOKEN}"))),
+            ..job()
+        };
+        let shown = format!(
+            "{:?}",
+            meta(&SessionView {
+                job: Some(&j),
+                ..job_fx.view()
+            })
+        );
+        assert!(!shown.contains(TOKEN), "{shown}");
+    }
+
+    #[test]
     fn auto_group_prefers_team_then_repo_then_elsewhere() {
         let mut fx = Fx::new(reg(RegStatus::Idle));
         assert_eq!(auto_group(&fx.view()), AutoGroup::Elsewhere);
@@ -1911,16 +1956,16 @@ mod tests {
             active: true,
         };
         fx.team = Some(Team {
-            name: "session-0f1e2d3c".into(),
+            name: SafeText::ours("session-0f1e2d3c"),
             lead: None,
             members: vec![member],
         });
         assert_eq!(
             auto_group(&fx.view()),
-            AutoGroup::Team("session-0f1e2d3c".into())
+            AutoGroup::Team(SafeText::ours("session-0f1e2d3c"))
         );
         fx.team = Some(Team {
-            name: "other".into(),
+            name: SafeText::ours("other"),
             lead: None,
             members: Vec::new(),
         });

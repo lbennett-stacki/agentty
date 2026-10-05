@@ -145,7 +145,7 @@ pub struct Anchor {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GroupName(pub String);
 
-#[derive(Clone, Debug, PartialEq, Eq, Default, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub struct SafeText(String);
 
 impl SafeText {
@@ -436,7 +436,7 @@ pub struct Snapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AutoGroup {
-    Team(String),
+    Team(SafeText),
     Repo(PathBuf),
     Elsewhere,
     Finished,
@@ -488,8 +488,8 @@ impl Row {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Meta {
-    pub branch: Option<String>,
-    pub worktree: Option<String>,
+    pub branch: Option<SafeText>,
+    pub worktree: Option<SafeText>,
     pub prs: Vec<u32>,
     pub ctx: Option<Ctx>,
     pub cost: Option<Cost>,
@@ -536,8 +536,8 @@ pub struct Node {
 #[derive(Clone, Debug, PartialEq)]
 pub enum NodeKind {
     Agent {
-        agent_type: String,
-        model: Option<String>,
+        agent_type: SafeText,
+        model: Option<SafeText>,
     },
     Shell,
     Monitor,

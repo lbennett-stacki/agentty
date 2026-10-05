@@ -187,7 +187,7 @@ pub struct Facts {
     pub last_prompt: Option<SafeText>,
     pub away_summary: Option<SafeText>,
     pub worktree: Option<Worktree>,
-    pub branch: Option<String>,
+    pub branch: Option<SafeText>,
     pub prs: Vec<u32>,
     pub usage: Option<Usage>,
     pub wakeup: Option<At>,
@@ -269,8 +269,8 @@ pub struct Titles {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Worktree {
     pub path: PathBuf,
-    pub name: String,
-    pub branch: Option<String>,
+    pub name: SafeText,
+    pub branch: Option<SafeText>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -329,7 +329,7 @@ impl Facts {
                 self.horizon.first_at.get_or_insert(at);
                 self.exit = None;
             }
-            Event::Branch(b) => self.branch = Some(b),
+            Event::Branch(b) => self.branch = Some(SafeText::redact(&b)),
             Event::TurnOpened { at } => self.turn = Turn::Open { since: at },
             Event::Interrupted { at } => self.turn = Turn::Interrupted { at },
             Event::TurnClosed { at, pending_agents } => {
@@ -796,8 +796,8 @@ fn events(line: &[u8], out: &mut Vec<Event>) -> Result<(), Reject> {
                 out.push(Event::Worktree(ws.and_then(|ws| {
                     Some(Worktree {
                         path: ws.worktree_path?,
-                        name: ws.worktree_name.unwrap_or_default(),
-                        branch: ws.worktree_branch,
+                        name: SafeText::redact(ws.worktree_name.as_deref().unwrap_or("")),
+                        branch: ws.worktree_branch.as_deref().map(SafeText::redact),
                     })
                 })));
             }
@@ -1779,8 +1779,8 @@ pub(crate) mod tests {
             "Add retry to the fetch helper"
         );
         assert_eq!(f.prs, [42, 43]);
-        assert_eq!(f.worktree.as_ref().unwrap().name, "retry");
-        assert_eq!(f.branch.as_deref(), Some("feat/retry"));
+        assert_eq!(f.worktree.as_ref().unwrap().name.as_str(), "retry");
+        assert_eq!(f.branch, Some(SafeText::ours("feat/retry")));
         assert_eq!(f.usage.as_ref().unwrap().ctx_tokens, 6 + 300 + 3100);
         assert!(f.last_text.as_ref().unwrap().is_question);
         assert_eq!(f.last_tool.as_ref().unwrap().summary.as_str(), "fetch.rs");

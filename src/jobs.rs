@@ -15,7 +15,7 @@ pub struct Job {
     pub fan: Vec<FanItem>,
     pub transcript: Option<PathBuf>,
     pub worktree_path: Option<PathBuf>,
-    pub worktree_branch: Option<String>,
+    pub worktree_branch: Option<SafeText>,
     pub name: Option<String>,
     pub remote_control: bool,
     pub prs: Vec<u32>,
@@ -140,7 +140,7 @@ pub fn parse(id: JobId, bytes: &[u8]) -> Result<Job, Problem> {
         fan: w.fan.into_iter().flatten().map(fan_item).collect(),
         transcript: w.link_scan_path,
         worktree_path: w.worktree_path,
-        worktree_branch: nonempty(w.worktree_branch),
+        worktree_branch: nonempty(w.worktree_branch).map(|b| SafeText::redact(&b)),
         name: nonempty(w.name),
         remote_control: nonempty(w.bridge_session_id).is_some(),
         prs,
@@ -272,7 +272,7 @@ mod tests {
             job.ended_at, job.updated_at,
             "no lastTerminalAt: fall back to updatedAt"
         );
-        assert_eq!(job.worktree_branch.as_deref(), Some("fees"));
+        assert_eq!(job.worktree_branch, Some(SafeText::ours("fees")));
         assert!(
             job.transcript
                 .as_ref()

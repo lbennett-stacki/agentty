@@ -596,7 +596,7 @@ fn group_of(row: &Row, user: &UserState) -> GroupId {
 fn group_title(group: &GroupId) -> String {
     match group {
         GroupId::User { name, .. } => name.0.clone(),
-        GroupId::Auto(AutoGroup::Team(t)) => format!("team {t}"),
+        GroupId::Auto(AutoGroup::Team(t)) => format!("team {}", t.as_str()),
         GroupId::Auto(AutoGroup::Repo(p)) => p.file_name().map_or_else(
             || p.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
@@ -612,7 +612,7 @@ fn matches(row: &Row, label: Option<&str>, group: &str, needle: &str) -> bool {
         Some(row.title.as_str()),
         label,
         Some(row.now.as_str()),
-        row.meta.branch.as_deref(),
+        row.meta.branch.as_ref().map(SafeText::as_str),
     ]
     .into_iter()
     .flatten()
@@ -920,7 +920,7 @@ fn draw_line(out: &mut Vec<TLine<'static>>, line: &Line, selected: bool, width: 
         } => {
             let (g, style) = node_glyph(kind, *state);
             let model = match kind {
-                NodeKind::Agent { model: Some(m), .. } => format!("{m}  "),
+                NodeKind::Agent { model: Some(m), .. } => format!("{}  ", m.as_str()),
                 _ => String::new(),
             };
             let right = vec![Span::styled(
@@ -971,7 +971,7 @@ fn node_glyph(kind: &NodeKind, state: NodeState) -> (&'static str, Style) {
 
 fn kind_name(kind: &NodeKind) -> &str {
     match kind {
-        NodeKind::Agent { agent_type, .. } => agent_type,
+        NodeKind::Agent { agent_type, .. } => agent_type.as_str(),
         NodeKind::Shell => "shell",
         NodeKind::Monitor => "monitor",
         NodeKind::Workflow => "workflow",
@@ -991,8 +991,8 @@ fn meta_text(meta: &Meta) -> String {
     if meta.bg {
         place.push("bg");
     }
-    if let Some(b) = meta.branch.as_deref().or(meta.worktree.as_deref()) {
-        place.push(b);
+    if let Some(b) = meta.branch.as_ref().or(meta.worktree.as_ref()) {
+        place.push(b.as_str());
     }
     let mut place = place.join(" · ");
     if let Some(pr) = meta.prs.last() {
@@ -1438,7 +1438,7 @@ mod tests {
     #[test]
     fn filter_matches_label_branch_cwd_and_group_case_insensitively() {
         let mut a = row("alpha task", 1, Status::Working, 0, repo("one"));
-        a.meta.branch = Some("feat/Fees".into());
+        a.meta.branch = Some(SafeText::ours("feat/Fees"));
         let b = row("beta task", 2, Status::Working, 0, repo("one"));
         let c = row("gamma task", 3, Status::Working, 0, repo("two"));
         let d = row("delta task", 4, Status::Working, 0, repo("three"));
@@ -1470,8 +1470,8 @@ mod tests {
 
     fn agent() -> NodeKind {
         NodeKind::Agent {
-            agent_type: "Explore".into(),
-            model: Some("sonnet".into()),
+            agent_type: SafeText::ours("Explore"),
+            model: Some(SafeText::ours("sonnet")),
         }
     }
 
@@ -1936,7 +1936,7 @@ mod tests {
         );
         needs.now = SafeText::ours("permission prompt · Bash");
         needs.meta = Meta {
-            branch: Some("feat/auth-race".into()),
+            branch: Some(SafeText::ours("feat/auth-race")),
             prs: vec![4812],
             ctx: Some(Ctx::Tokens(412_000)),
             ..Meta::default()

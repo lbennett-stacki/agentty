@@ -679,13 +679,17 @@ pub fn meta(v: &SessionView<'_>) -> Meta {
 }
 
 fn branch(facts: Option<&Facts>, job: Option<&Job>) -> Option<SafeText> {
-    facts
-        .and_then(|f| {
-            f.branch
-                .clone()
-                .or_else(|| f.worktree.as_ref().and_then(|w| w.branch.clone()))
-        })
-        .or_else(|| job.and_then(|j| j.worktree_branch.clone()))
+    // `gitBranch` is the literal "HEAD" on a detached checkout, which names nothing.
+    let named = |b: &&SafeText| b.as_str() != "HEAD";
+    let live = facts.and_then(|f| f.branch.as_ref()).filter(named);
+    let worktree = facts
+        .and_then(|f| f.worktree.as_ref())
+        .and_then(|w| w.branch.as_ref());
+    let job = job.and_then(|j| j.worktree_branch.as_ref());
+    live.or(worktree.filter(named))
+        .or(job.filter(named))
+        .or(facts.and_then(|f| f.branch.as_ref()))
+        .cloned()
 }
 
 fn worktree(facts: Option<&Facts>, job: Option<&Job>) -> Option<SafeText> {
@@ -1706,6 +1710,23 @@ mod tests {
         assert_eq!(row.status, Status::Exited(JobOutcome::Done));
         assert_eq!(row.auto_group, AutoGroup::Finished);
         assert_eq!(row.since, at(-3600));
+    }
+
+    #[test]
+    fn detached_head_falls_back_to_the_worktree_branch() {
+        // Defect: a detached worktree checkout shown as branch "HEAD".
+        let mut fx = Fx::new(bg_reg(RegStatus::Idle))
+            .with_facts(|f| f.branch = Some(SafeText::ours("HEAD")));
+        fx.job = Some(Job {
+            worktree_branch: Some(SafeText::ours("feat/live-scores")),
+            ..job()
+        });
+        assert_eq!(
+            meta(&fx.view()).branch,
+            Some(SafeText::ours("feat/live-scores"))
+        );
+        fx.job = None;
+        assert_eq!(meta(&fx.view()).branch, Some(SafeText::ours("HEAD")));
     }
 
     #[test]

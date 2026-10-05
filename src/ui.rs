@@ -707,7 +707,16 @@ pub fn dump(app: &App, snap: &Snapshot, user: &UserState, now: At, width: u16) -
         .expect("TestBackend is infallible");
     term.draw(|f| render(f, app, snap, user, now))
         .expect("TestBackend is infallible");
-    buffer_text(term.backend().buffer())
+    let mut out = buffer_text(term.backend().buffer());
+    for d in &snap.diagnostics {
+        out.push_str(&format!(
+            "⚠ {:?}  {}  {}\n",
+            d.source,
+            problem_text(&d.problem),
+            d.path
+        ));
+    }
+    out
 }
 
 fn buffer_text(buf: &Buffer) -> String {
@@ -1464,6 +1473,25 @@ mod tests {
             agent_type: "Explore".into(),
             model: Some("sonnet".into()),
         }
+    }
+
+    #[test]
+    fn dump_lists_diagnostics_with_unknown_values_redacted() {
+        let mut s = snap(vec![]);
+        s.diagnostics.push(Diagnostic {
+            source: DiagSource::Registry,
+            problem: Problem::UnknownValue {
+                field: "status",
+                value: "ghp_0123456789abcdefghijABCDEFGHIJ0123".into(),
+            },
+            path: "~/.claude/sessions/1.json".into(),
+        });
+        let text = dump(&App::new(false), &s, &UserState::default(), NOW, 100);
+        assert!(
+            text.contains("⚠ Registry  unknown status \"…\"  ~/.claude/sessions/1.json"),
+            "{text}"
+        );
+        assert!(!text.contains("ghp_"), "{text}");
     }
 
     fn tree_row() -> Row {

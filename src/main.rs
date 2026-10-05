@@ -83,9 +83,6 @@ fn main() -> anyhow::Result<()> {
             "{}",
             ui::dump(&app, &snap, store.state(), world.now(), DUMP_WIDTH)
         );
-        for d in &snap.diagnostics {
-            println!("⚠ {:?} {:?} {}", d.source, d.problem, d.path);
-        }
         return Ok(());
     }
 

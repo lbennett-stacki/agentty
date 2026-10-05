@@ -236,12 +236,21 @@ fn looks_secret(word: &str) -> bool {
     {
         return true;
     }
-    let run = bare
-        .split(|c: char| !(c.is_ascii_alphanumeric() || "_-+/=".contains(c)))
-        .map(str::len)
-        .max()
-        .unwrap_or(0);
-    run >= 32 && !bare.starts_with('/') && !bare.contains("://")
+    if bare.starts_with('/') || bare.contains("://") {
+        return false;
+    }
+    bare.split(|c: char| !(c.is_ascii_alphanumeric() || "_-+/=".contains(c)))
+        .any(|run| run.len() >= 32 && !word_like(run))
+}
+
+// Branch and worktree names are long runs of lowercase words joined by hyphens, and 159 of the
+// 414 on this machine reach 32 chars. Two such words tell them apart from a token: a random
+// base64 or hex run almost never contains one, let alone two.
+fn word_like(run: &str) -> bool {
+    run.split('-')
+        .filter(|seg| seg.len() >= 3 && seg.bytes().all(|b| b.is_ascii_lowercase()))
+        .count()
+        >= 2
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -671,6 +680,25 @@ mod tests {
             shown.as_str(),
             "token … in /Users/me/workspace/some/really/long/path/name.rs"
         );
+    }
+
+    #[test]
+    fn redact_keeps_long_hyphenated_names_and_still_hides_tokens() {
+        for name in [
+            "fix/sidecar-shells-and-monitors-in-parked-counts",
+            "worktree-agent-a75df4f59c3525f50",
+            "luke/db-query-prod-database-name",
+        ] {
+            assert_eq!(SafeText::redact(name).as_str(), name);
+        }
+        for token in [
+            "0123456789abcdef0123456789abcdef",
+            "QWxhZGRpbjpvcGVuIHNlc2FtZQ+/QWxhZGRpbjpvcGVu",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            "AKIAIOSFODNN7EXAMPLEAKIAIOSFODNN7EXAMPLE",
+        ] {
+            assert_eq!(SafeText::redact(token).as_str(), "…", "{token}");
+        }
     }
 
     #[test]

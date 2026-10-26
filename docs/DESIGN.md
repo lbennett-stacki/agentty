@@ -16,31 +16,28 @@ Show every live Claude Code session in one grouped list with a status that tells
 ## What the user sees
 
 ```
- agentty  7 live · 1 needs you · 1 parked                                      ? help
- jnj-web ─────────────────────────────────────────────────────────────────────────────── 4
- ▲ auth-race  Fix token refresh race in session middleware   feat/auth-race #4812  412k   3m
-     permission prompt · Bash: Run migration against staging
- ● Splice PR 4790 into a reviewable stack                     splice/4790          288k  42s
-     Edit: stack_plan.rs
- ◐ docs sweep  Rewrite onboarding docs                  ⇄    docs/onboarding #4790  91k  18m
-     waiting on 2 agents, 1 monitor
-     ├─ ● pstack:poteto-agent  Audit README links              opus     6m  Grep: broken anchors
-     │  ├─ ● Explore  Find dead links in guides                 sonnet   1m  Read: guide.md
-     │  └─ ✓ 2 finished
-     ├─ ◉ monitor  Watch CI for PR #4790                                14m
-     └─ ✓ 4 finished
- ○ fees  Rework fee rounding                                   bg · main             64k   1h
-     Fee logic done; client-side & policy next
- agentty ─────────────────────────────────────────────────────────────────────────── 1
- ? Claude agents TUI replacement                              personal · main  277k $3.41  5m
-     Want me to wire the statusline tee now?
- finished · 24h ──────────────────────────────────────────────────────────────────────── 1
- · pm-team-logos  Team logos for PM board                     bg · pm-team-logos  $2.17 2h
-     done
- j/k move  l expand  ⏎ open  tab detail  r label  m move  n new  / filter  q quit
+ agentty  7 live · 1 needs you · 1 your turn · 1 waiting                     ? help
+ status       session
+ jnj-web ─────────────────────────────────────────────────────────────────────── 4
+ ▲ needs you  auth-race  Fix token refresh race in session middleware
+ ● working    Splice PR 4790 into a reviewable stack
+ ◐ waiting    docs sweep  Rewrite onboarding docs
+   ├─ ● pstack:poteto-agent  Audit README links
+   │  ├─ ● Explore  Find dead links in guides
+   │  └─ ✓ 2 finished
+   ├─ ◉ monitor  Watch CI for PR #4790
+   └─ ✓ 4 finished
+ ○ idle       fees  Rework fee rounding
+ agentty ─────────────────────────────────────────────────────────────────────── 1
+ ? your turn  Claude agents TUI replacement
+ finished · 24h ──────────────────────────────────────────────────────────────── 1
+ · ended      pm-team-logos  Team logos for PM board
+ ⏎ open   tab details   l agents   n new   r label   m move   s skills   / filter   ? help
 ```
 
-Glyphs: `▲` NeedsYou (red); `●` Working (green); `◐` Parked (yellow); `?` Idle where the last turn ended on a question (a heuristic, so it stays in the Idle rank and only sorts first within it); `○` Idle; `·` Exited (dim). `⇄` marks Remote Control. `personal` is the config-dir tag; the default `~/.claude` has no tag. Context shows `NN%` only when the statusline tee exists, otherwise absolute tokens. Cost shows only from an authoritative source (the statusline tee, or `cost-state` on exit). `1+ shell` appears when the registry says `shell` but the launch predates our tail window.
+The list holds only status and name. The details pane (tab) carries the now-line, branch and PRs, context, cost, age, how the session runs, its background agents, the last prompt and reply, open tasks, pending work and ids.
+
+Glyphs and words: `▲` needs you (red); `?` your turn (yellow), Idle where the last turn ended on a question (a heuristic, so it stays in the Idle rank and only sorts first within it); `●` working (green); `◐` waiting, the Parked status (cyan); `○` idle; `·` ended, an Exited job (dim). The details pane names Remote Control and the config-dir tag (`personal`; the default `~/.claude` has none). Context shows `NN%` only when the statusline tee exists, otherwise absolute tokens. Cost shows only from an authoritative source (the statusline tee, or `cost-state` on exit). `1+ shell` appears when the registry says `shell` but the launch predates our tail window.
 
 Keys: `j`/`k`/`↓`/`↑`/`g`/`G` move; `l`/`→`/`space` expand, `h`/`←` collapse; `Enter` open; `tab`/`p` detail; `r` label; `m` move to group (`-` returns to the automatic group); `n` new bg `claude` in the row's cwd, config dir and group, with an optional name, attached in place; `/` filter; `?` help plus diagnostics; `q`/`Esc` quit.
 

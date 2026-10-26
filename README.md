@@ -3,21 +3,22 @@
 A tmux dashboard that lists every live Claude Code session on this machine and shows what each one is actually doing. Press Enter on a row to jump into the real session. agentty only reads Claude Code's files. It never writes them, installs no hooks, and does not wrap or re-implement Claude Code.
 
 ```
- agentty  5 live · 1 needs you · 2 parked                                       ? help
- webapp ──────────────────────────────────────────────────────────────────────────────── 3
-›▲ Fix token refresh race                          feat/auth-race #4812  412k   3m
-     permission prompt · Bash: Run migration against staging
- ◐ Rewrite onboarding docs                         docs/onboarding #4790  91k  18m
-     waiting on 2 agents, 1 monitor
-     ├─ ● pstack:poteto-agent  Audit README links     opus  Grep: broken anchors  6m
-     ├─ ◉ monitor  Watch CI for PR #4790                                          14m
-     └─ ✓ 4 finished
- ● Splice PR 4790 into a stack                     splice/4790          288k  42s
-     Edit: stack_plan.rs
- agentty ─────────────────────────────────────────────────────────────────────────── 1
- ○ Dashboard design                                personal · main      277k   5m
-     Recap: sketched the module map
+ agentty  5 live · 1 needs you · 1 your turn · 1 waiting                ? help
+ status       session                │ Fix token refresh race       ▲ needs you
+ webapp ───────────────────────── 3  │
+ ▲ needs you  Fix token refresh race │      now permission prompt · Bash: Run
+ ◐ waiting    Rewrite onboarding docs│          migration against staging
+   ├─ ● pstack:poteto-agent  Audit … │   branch feat/auth-race  #4812
+   ├─ ◉ monitor  Watch CI for PR #4… │  context 412k tokens
+   └─ ✓ 4 finished                   │      age 3m ago
+ ● working    Splice PR 4790 into a …│  runs as tmux pane
+ agentty ──────────────────────── 2  │
+ ? your turn  Dashboard design       │      you run the migration on staging
+ ○ idle       Fee rounding           │   claude Running it now.
+ ⏎ open   tab details   l agents   n new   r label   m move   s skills   / filter   ? help
 ```
+
+The list shows each session's status and name. tab opens the details pane beside it, which holds everything else.
 
 ## Why it exists
 
@@ -46,12 +47,14 @@ bind A run-shell 'tmux select-window -t "=agents" 2>/dev/null || tmux new-window
 |---|---|---|
 | `▲` | needs you | The registry says `waiting`: a permission prompt, a question, or a dialog. For a bg job, it can also mean the job reported a blocking question. |
 | `●` | working | A turn is streaming. |
-| `◐` | parked | No turn is streaming, but the session is waiting on its own background agents, shells, monitors, workflows, or a scheduled wakeup. The second line counts them. `1+` means a launch happened before the part of the transcript agentty read. |
-| `?` | asked a question | Idle, and the last reply ends in a question. This is a heuristic, so it sorts first among idle rows but never ranks as needs you. |
+| `◐` | waiting | No turn is streaming, but the session is waiting on its own background agents, shells, monitors, workflows, or a scheduled wakeup. The details pane's "now" line counts them. `1+` means a launch happened before the part of the transcript agentty read. |
+| `?` | your turn | Idle, and the last reply ends in a question. This is a heuristic, so it sorts first among idle rows but never ranks as needs you. |
 | `○` | idle | Nothing in flight. |
-| `·` | exited | A bg job that ended in the last 24 hours. |
+| `·` | ended | A bg job that ended in the last 24 hours. |
 
-A row's title is your label if you set one, otherwise Claude Code's `/rename` title, otherwise the session name or the AI title. The second line shows what the session is doing now: the latest tool call and its description, what it is parked on, or the latest recap.
+A row's name is your label if you set one (with the title beside it, dim), otherwise Claude Code's `/rename` title, otherwise the session name or the AI title. The selected row has a highlighted background.
+
+The details pane (tab) shows the rest: "now", what the session is doing (the latest tool call and its description, what it is waiting on, or the latest recap), then its branch and pull requests, context, cost, age, how it runs, its background agents, your last prompt and Claude's last reply, open tasks, pending work, folder, config dir and session id. In a terminal 100 columns or wider it sits beside the list. Otherwise it sits below.
 
 Rows group by your own groups first, then by team, then by git repository (worktrees fold into their main repository).
 
@@ -64,7 +67,7 @@ Rows group by your own groups first, then by team, then by git repository (workt
 | `l`, `→`, space | expand the subagent tree |
 | `h`, `←` | collapse |
 | Enter | open the session: switch to its tmux pane, or, for a bg job, run `claude attach <job>` right here in agentty's place. Ctrl+Z detaches and brings agentty back (← opens Claude Code's own agent view instead). Attaching works outside tmux too. |
-| tab, `p` | show the detail pane (last prompt, last reply, open tasks, pending work, ids) |
+| tab, `p` | show the details pane |
 | `r` | set a label (an empty label clears it) |
 | `m` | move to a group. Type a new name to create a group, or `-` to return the row to its automatic group. |
 | `n` | start a new background `claude` (`claude --bg`) in the selected row's directory and group, and attach to it here. Ctrl+Z comes back. In a workspace it starts on the workspace account with the most usage left, and tab picks another. |
@@ -95,7 +98,7 @@ accounts = ["personal", "wukong"]
 
 agentty opens on the workspace whose `root` holds the directory you start it in, and shows only sessions whose working directory is under that root. `--workspace <name>` picks one, `--all` shows everything, and `w` switches while it runs. Without this file, agentty shows every session.
 
-The header shows each workspace account's 5-hour and 7-day usage, such as `personal 5h 12% 7d 52%  wukong 7d ↺`. `↺` means the window has reset since agentty last saw it. A dim age such as `(1d)` means the numbers are that old. `n` starts new sessions on the account with the most room: one with no full window, then the least 7-day use, then the least 5-hour use. That account's name is bold.
+The header shows each workspace account's 5-hour and 7-day usage, such as `personal 5h 12% 7d 52%  wukong 7d fresh`. A number turns yellow at 70% and red at 90%, and a window at 100% reads `full`. `fresh` means the window has reset since agentty last saw it. A dim age such as `(1d)` means the numbers are that old. `n` starts new sessions on the account with the most room: one with no full window, then the least 7-day use, then the least 5-hour use. That account's name is bold.
 
 Usage comes from three places, and agentty uses the newest for each window:
 
@@ -105,7 +108,7 @@ Usage comes from three places, and agentty uses the newest for each window:
 
 ## Skills across accounts
 
-`s` shows every skill in each account's `skills/` folder, one row per skill and one column per account. Each cell is `●` (the account's own copy), `→` (a symlink to a copy elsewhere), `·` (missing) or `✗` (a broken symlink). Two accounts whose whole `skills/` folder is one folder are named on the last line. Rows that need something come first: a skill missing on some account, held as two separate copies, or linked to nothing. Then come shared skills, then the ones you keep local. Claude.ai's `synced/` folder is skipped.
+`s` shows every skill in each account's `skills/` folder, one row per skill and one column per account. Each cell is `●` (the account's own copy), `→` (a symlink to a copy elsewhere), `·` (missing) or `✗` (a broken symlink). Two accounts whose whole `skills/` folder is one folder are named on the last line. Skills sit in three sections. "Needs sharing" comes first: a skill missing on some account, held as two separate copies, or linked to nothing, each with the problem in words. Then come "Shared everywhere" and "Kept local". The selected skill says what Enter or `x` will do to it. Claude.ai's `synced/` folder is skipped.
 
 | key | action |
 |---|---|

@@ -3,18 +3,24 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TLine, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use super::{App, Key, Mode, dim, truncate};
+use super::{App, Key, Mode, band, dim, truncate};
 use crate::derive::roomiest;
 use crate::model::{At, ConfigDir, Effect, Op, Snapshot};
 use crate::skills::{Cell, Inventory, Skill};
 use crate::user_state::UserState;
 
-pub const FOOTER: &str = " j/k move  ⏎ share  x keep local  r rescan  s esc sessions  q quit";
+pub const KEYS: &[(&str, &str)] = &[
+    ("⏎", "share"),
+    ("x", "keep local"),
+    ("r", "rescan"),
+    ("esc", "sessions"),
+    ("?", "help"),
+];
 const NAME_MAX: usize = 32;
 
 #[derive(Debug)]
@@ -43,11 +49,6 @@ impl SkillsView {
             .as_ref()
             .and_then(|name| order.iter().position(|&i| &self.inv.skills[i].name == name));
         named.or((!order.is_empty()).then_some(0))
-    }
-
-    /// The header line, the grid, and the shared-folder note.
-    pub fn height(&self) -> usize {
-        self.inv.skills.len() + 1 + usize::from(!shared_folders(&self.inv).is_empty())
     }
 }
 
@@ -155,7 +156,15 @@ fn share(app: &mut App, snap: &Snapshot, user: &UserState, i: usize, now: At) ->
     vec![]
 }
 
-pub fn render(frame: &mut Frame, area: Rect, app: &App, view: &SkillsView, user: &UserState) {
+/// The view's lines: account names over the columns, then a section per need, each skill on
+/// one line with its plain-words problem, and a legend. Also returns how many lines reach to
+/// the end of the selected skill, for scrolling.
+pub fn lines(
+    app: &App,
+    view: &SkillsView,
+    user: &UserState,
+    width: usize,
+) -> (Vec<TLine<'static>>, usize) {
     let inv = &view.inv;
     let config = &app.scope.config;
     let names: Vec<String> = inv
@@ -169,64 +178,113 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, view: &SkillsView, user:
         .map(|s| s.name.width())
         .max()
         .unwrap_or(0)
-        .clamp(5, NAME_MAX);
-    let mut head = vec![Span::styled(format!("  {:<name_w$}", "skill"), dim())];
-    for n in &names {
-        head.push(Span::styled(format!("  {n}"), dim()));
+        .clamp(5, NAME_MAX)
+        + 2;
+    let col_w: Vec<usize> = names.iter().map(|n| n.width().max(1) + 2).collect();
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+
+    let mut head = vec![Span::raw(format!("   {:<name_w$}", ""))];
+    for (n, w) in names.iter().zip(&col_w) {
+        head.push(Span::styled(format!("{n:<w$}"), dim()));
     }
     let mut out = vec![TLine::from(head)];
 
     let order = order(inv, user);
-    let at = view.at(&order);
-    for (pos, &i) in order.iter().enumerate() {
+    let at = view.at(&order).map(|p| order[p]);
+    let mut last = None;
+    let mut sel_end = 0;
+    for &i in &order {
         let skill = &inv.skills[i];
         let need = need(skill, user);
-        let base = if need == Need::Local {
-            dim()
-        } else {
-            Style::new()
-        };
-        let mark = if at == Some(pos) { "›" } else { " " };
-        let mut spans = vec![Span::styled(
-            format!("{mark} {:<name_w$}", truncate(&skill.name, NAME_MAX)),
-            base,
-        )];
-        let copies = skill.spread().copies;
-        for (cell, n) in skill.cells.iter().zip(&names) {
-            let (glyph, style) = cell_glyph(cell, copies);
-            let pad = n.width().saturating_sub(1);
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                glyph,
-                if need == Need::Local { dim() } else { style },
-            ));
-            spans.push(Span::raw(" ".repeat(pad)));
+        if last != Some(need) {
+            last = Some(need);
+            let (title, style) = match need {
+                Need::Act => ("Needs sharing", bold.fg(Color::Yellow)),
+                Need::Shared => ("Shared everywhere", bold.fg(Color::Green)),
+                Need::Local => ("Kept local", dim().add_modifier(Modifier::BOLD)),
+            };
+            let n = order
+                .iter()
+                .filter(|&&j| self::need(&inv.skills[j], user) == need)
+                .count();
+            out.push(TLine::raw(""));
+            out.push(TLine::from(vec![
+                Span::styled(format!(" {title}"), style),
+                Span::styled(format!("  {n}"), dim()),
+            ]));
         }
-        let (text, style) = summary(skill, user, &names);
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(text, style));
-        out.push(TLine::from(spans));
-    }
-    let note = shared_folders(inv);
-    if !note.is_empty() {
-        let groups: Vec<String> = note
-            .iter()
-            .map(|g| {
-                g.iter()
-                    .map(|&i| names[i].as_str())
-                    .collect::<Vec<_>>()
-                    .join(" = ")
-            })
-            .collect();
-        out.push(TLine::from(Span::styled(
-            format!(
-                "  one skills folder: {}   ● copy  → link  · missing  ✗ broken",
-                groups.join(", ")
+        let selected = at == Some(i);
+        let name_style = match (selected, need) {
+            (true, _) => bold,
+            (false, Need::Local) => dim(),
+            (false, _) => Style::new(),
+        };
+        let mut spans = vec![
+            Span::styled(
+                if selected { " ▌ " } else { "   " },
+                Style::new().fg(Color::Yellow),
             ),
-            dim(),
-        )));
+            Span::styled(
+                format!("{:<name_w$}", truncate(&skill.name, NAME_MAX)),
+                name_style,
+            ),
+        ];
+        let copies = skill.spread().copies;
+        for (cell, w) in skill.cells.iter().zip(&col_w) {
+            let (glyph, style) = cell_glyph(cell, copies);
+            let style = if need == Need::Local { dim() } else { style };
+            spans.push(Span::styled(format!("{glyph:<w$}"), style));
+        }
+        if need != Need::Shared {
+            spans.push(Span::styled(
+                problem(skill, user, &names),
+                if need == Need::Local {
+                    dim()
+                } else {
+                    Style::new()
+                },
+            ));
+        }
+        let line = TLine::from(spans);
+        out.push(if selected { band(line, width) } else { line });
+        if selected && let Some(hint) = hint(need) {
+            let line = TLine::from(vec![
+                Span::raw(" ".repeat(3 + name_w)),
+                Span::styled(hint, dim()),
+            ]);
+            out.push(band(line, width));
+        }
+        if selected {
+            sel_end = out.len();
+        }
     }
-    let sel_end = at.map_or(0, |p| p + 2);
+
+    out.push(TLine::raw(""));
+    let mut legend = "   ● own copy   → linked   · missing   ✗ broken link".to_owned();
+    for g in shared_folders(inv) {
+        let joined: Vec<&str> = g.iter().map(|&i| names[i].as_str()).collect();
+        legend.push_str(&format!(
+            "      {} share one skills folder",
+            joined.join(" and ")
+        ));
+    }
+    out.push(TLine::from(Span::styled(legend, dim())));
+    (out, sel_end)
+}
+
+/// What Enter or x does to the selected skill.
+fn hint(need: Need) -> Option<&'static str> {
+    match need {
+        Need::Act => {
+            Some("⏎ starts a share-skill agent that keeps one copy and links it into every account")
+        }
+        Need::Shared => None,
+        Need::Local => Some("x shares it again"),
+    }
+}
+
+pub fn render(frame: &mut Frame, area: Rect, app: &App, view: &SkillsView, user: &UserState) {
+    let (out, sel_end) = lines(app, view, user, usize::from(area.width));
     let scroll = sel_end.saturating_sub(usize::from(area.height));
     frame.render_widget(
         Paragraph::new(out).scroll((u16::try_from(scroll).unwrap_or(0), 0)),
@@ -242,22 +300,23 @@ fn cell_glyph(cell: &Cell, copies: usize) -> (&'static str, Style) {
     };
     match cell {
         Cell::Has { linked: false, .. } => ("●", copy),
-        Cell::Has { linked: true, .. } => ("→", copy),
+        Cell::Has { linked: true, .. } => ("→", dim()),
         Cell::Missing => ("·", dim()),
         Cell::Broken => ("✗", Style::new().fg(Color::Red)),
     }
 }
 
-fn summary(skill: &Skill, user: &UserState, names: &[String]) -> (String, Style) {
+/// What's wrong with a skill, in a sentence that names the accounts.
+fn problem(skill: &Skill, user: &UserState, names: &[String]) -> String {
     if user.local_skills.contains(&skill.name) {
-        return ("keep local".into(), dim());
+        return "Kept on these accounts only".into();
     }
     let spread = skill.spread();
     let list = |ix: &[usize]| {
         ix.iter()
             .map(|&i| names[i].as_str())
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(" and ")
     };
     let mut parts = Vec::new();
     if !spread.broken.is_empty() {
@@ -265,7 +324,7 @@ fn summary(skill: &Skill, user: &UserState, names: &[String]) -> (String, Style)
     }
     if spread.copies > 1 {
         parts.push(if skill.differ {
-            format!("{} copies, SKILL.md differs", spread.copies)
+            format!("{} separate copies that differ", spread.copies)
         } else {
             format!("{} identical copies", spread.copies)
         });
@@ -273,11 +332,11 @@ fn summary(skill: &Skill, user: &UserState, names: &[String]) -> (String, Style)
     if !spread.missing.is_empty() {
         parts.push(format!("missing on {}", list(&spread.missing)));
     }
-    match parts.is_empty() {
-        true => ("shared".into(), Style::new().fg(Color::Green)),
-        false if !spread.broken.is_empty() => (parts.join(" · "), Style::new().fg(Color::Red)),
-        false => (parts.join(" · "), Style::new().fg(Color::Yellow)),
-    }
+    let text = parts.join("; ");
+    let mut c = text.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
 }
 
 /// Groups of two or more accounts whose `skills/` is one folder.

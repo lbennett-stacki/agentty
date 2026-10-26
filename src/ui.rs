@@ -6,7 +6,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TLine, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::{Frame, Terminal};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -24,7 +24,12 @@ mod skills_view;
 use skills_view::SkillsView;
 
 const FLASH_MS: i64 = 4000;
-const INDENT: &str = "     ";
+/// The list's width when the details pane sits beside it.
+const LIST_WIDTH: u16 = 56;
+/// The selected row's background, from the 256-colour palette so it follows the terminal theme.
+const BAND: Color = Color::Indexed(237);
+/// The status column: glyph, space, and the longest status word.
+const STATUS_WIDTH: usize = 13;
 
 #[derive(Debug)]
 pub struct App {
@@ -604,9 +609,6 @@ pub enum Line {
         status: Status,
         label: Option<String>,
         title: SafeText,
-        meta: Meta,
-        now: SafeText,
-        since: At,
         expanded: bool,
     },
     Node {
@@ -615,8 +617,6 @@ pub enum Line {
         kind: NodeKind,
         state: NodeState,
         label: SafeText,
-        now: Option<SafeText>,
-        since: At,
         prefix: String,
     },
     Finished {
@@ -635,13 +635,6 @@ impl Line {
                 id: id.clone(),
             }),
             Line::Header { .. } | Line::Finished { .. } => None,
-        }
-    }
-
-    fn height(&self) -> usize {
-        match self {
-            Line::Row { .. } => 2,
-            _ => 1,
         }
     }
 }
@@ -678,9 +671,6 @@ pub fn layout(snap: &Snapshot, user: &UserState, app: &App) -> Vec<Line> {
                 status: row.status.clone(),
                 label: label(row),
                 title: row.title.clone(),
-                meta: row.meta.clone(),
-                now: row.now.clone(),
-                since: row.since,
                 expanded,
             });
             if expanded {
@@ -743,8 +733,6 @@ fn flatten(out: &mut Vec<Line>, row: &RowKey, tree: &Tree, indent: &str) {
             kind: node.kind.clone(),
             state: node.state,
             label: node.label.clone(),
-            now: node.now.clone(),
-            since: node.since,
             prefix: format!("{indent}{}", if last { "└─" } else { "├─" }),
         });
         flatten(
@@ -784,27 +772,30 @@ pub fn render(frame: &mut Frame, app: &App, snap: &Snapshot, user: &UserState, n
         if app.detail
             && let Some(row) = current
         {
-            let wide = body.width >= 120;
+            let wide = body.width >= 100;
             let [list, pane] = if wide {
-                Layout::horizontal([Constraint::Min(0), Constraint::Percentage(40)]).areas(body)
+                let list = (body.width / 2).min(LIST_WIDTH);
+                Layout::horizontal([Constraint::Length(list), Constraint::Min(0)]).areas(body)
             } else {
-                Layout::vertical([Constraint::Min(0), Constraint::Percentage(40)]).areas(body)
+                Layout::vertical([Constraint::Min(0), Constraint::Percentage(60)]).areas(body)
             };
             list_area = list;
+            let label = user.entry(&row.user_key).and_then(|e| e.label.as_deref());
             render_detail(
                 frame,
                 pane,
                 row,
-                user,
+                label,
                 if wide { Borders::LEFT } else { Borders::TOP },
+                now,
             );
         }
-        render_list(frame, list_area, &lines, sel, now);
+        render_list(frame, list_area, &lines, sel);
     }
     frame.render_widget(Paragraph::new(footer(app, now)), foot);
 
     match &app.mode {
-        Mode::Help => render_help(frame, body, snap),
+        Mode::Help => render_help(frame, body, app, snap),
         Mode::Move {
             input,
             choice,
@@ -819,8 +810,10 @@ pub fn render(frame: &mut Frame, app: &App, snap: &Snapshot, user: &UserState, n
 
 pub fn dump(app: &App, snap: &Snapshot, user: &UserState, now: At, width: u16) -> String {
     let body: usize = match &app.skills {
-        Some(view) => view.height(),
-        None => layout(snap, user, app).iter().map(Line::height).sum(),
+        Some(view) => skills_view::lines(app, view, user, usize::from(width))
+            .0
+            .len(),
+        None => layout(snap, user, app).len() + 1,
     };
     let height = u16::try_from(body + 2).unwrap_or(u16::MAX);
     let mut term = Terminal::new(ratatui::backend::TestBackend::new(width, height))
@@ -863,13 +856,90 @@ fn dim() -> Style {
     Style::new().add_modifier(Modifier::DIM)
 }
 
-fn status_style(status: &Status) -> Style {
-    match status.rank() {
-        Rank::NeedsYou => Style::new().fg(Color::Red),
-        Rank::Working => Style::new().fg(Color::Green),
-        Rank::Parked => Style::new().fg(Color::Yellow),
-        Rank::Idle => Style::new(),
-        Rank::Exited => dim(),
+/// How a status looks everywhere it shows: list, details and the help legend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Look {
+    NeedsYou,
+    YourTurn,
+    Working,
+    Waiting,
+    Idle,
+    Ended,
+}
+
+impl Look {
+    const ALL: [Look; 6] = [
+        Look::NeedsYou,
+        Look::YourTurn,
+        Look::Working,
+        Look::Waiting,
+        Look::Idle,
+        Look::Ended,
+    ];
+
+    fn of(status: &Status) -> Look {
+        match status {
+            Status::NeedsYou(_) => Look::NeedsYou,
+            Status::Working => Look::Working,
+            Status::Parked(_) => Look::Waiting,
+            Status::Idle {
+                asked_question: true,
+            } => Look::YourTurn,
+            Status::Idle {
+                asked_question: false,
+            } => Look::Idle,
+            Status::Exited(_) => Look::Ended,
+        }
+    }
+
+    fn glyph(self) -> &'static str {
+        match self {
+            Look::NeedsYou => "▲",
+            Look::YourTurn => "?",
+            Look::Working => "●",
+            Look::Waiting => "◐",
+            Look::Idle => "○",
+            Look::Ended => "·",
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            Look::NeedsYou => "needs you",
+            Look::YourTurn => "your turn",
+            Look::Working => "working",
+            Look::Waiting => "waiting",
+            Look::Idle => "idle",
+            Look::Ended => "ended",
+        }
+    }
+
+    fn meaning(self) -> &'static str {
+        match self {
+            Look::NeedsYou => "blocked on a prompt or question",
+            Look::YourTurn => "replied with a question",
+            Look::Working => "running a turn",
+            Look::Waiting => "turn over, background work out",
+            Look::Idle => "nothing in flight",
+            Look::Ended => "bg job ended in the last day",
+        }
+    }
+
+    fn style(self) -> Style {
+        match self {
+            Look::NeedsYou => Style::new().fg(Color::Red),
+            Look::YourTurn => Style::new().fg(Color::Yellow),
+            Look::Working => Style::new().fg(Color::Green),
+            Look::Waiting => Style::new().fg(Color::Cyan),
+            Look::Idle => Style::new(),
+            Look::Ended => dim(),
+        }
+    }
+
+    /// Glyph and word, padded to the status column.
+    fn label(self) -> Span<'static> {
+        let text = format!("{} {}", self.glyph(), self.word());
+        Span::styled(format!("{text:<STATUS_WIDTH$}"), self.style())
     }
 }
 
@@ -879,7 +949,6 @@ fn header(app: &App, snap: &Snapshot, now: At, width: u16) -> TLine<'static> {
         .iter()
         .filter(|r| matches!(r.key, RowKey::Live { .. }))
         .count();
-    let count = |rank| rows.iter().filter(|r| r.status.rank() == rank).count();
     let bold = Style::new().add_modifier(Modifier::BOLD);
     let mut left = vec![Span::styled(" agentty", bold)];
     match app.workspace() {
@@ -891,14 +960,11 @@ fn header(app: &App, snap: &Snapshot, now: At, width: u16) -> TLine<'static> {
         left.push(Span::styled(" · skills", bold));
     }
     left.push(Span::raw(format!("  {live} live")));
-    for (rank, what, color) in [
-        (Rank::NeedsYou, "needs you", Color::Red),
-        (Rank::Parked, "parked", Color::Yellow),
-    ] {
-        let n = count(rank);
+    for look in [Look::NeedsYou, Look::YourTurn, Look::Waiting] {
+        let n = rows.iter().filter(|r| Look::of(&r.status) == look).count();
         if n > 0 {
             left.push(Span::raw(" · "));
-            left.push(Span::styled(format!("{n} {what}"), Style::new().fg(color)));
+            left.push(Span::styled(format!("{n} {}", look.word()), look.style()));
         }
     }
     let mut right = limits_spans(app, snap, now);
@@ -961,14 +1027,14 @@ const STALE_LIMITS_MS: i64 = 60 * 60 * 1000;
 
 fn limits_pct(w: Window, now: At) -> Span<'static> {
     if w.resets_at <= now {
-        return Span::styled("↺", dim());
+        return Span::styled("fresh", Style::new().fg(Color::Green));
     }
-    let color = match w.used_pct {
-        p if p >= 90.0 => Color::Red,
-        p if p >= 70.0 => Color::Yellow,
-        _ => Color::Green,
-    };
-    Span::styled(format!("{:.0}%", w.used_pct), Style::new().fg(color))
+    match w.used_pct {
+        p if p >= 100.0 => Span::styled("full", Style::new().fg(Color::Red)),
+        p if p >= 90.0 => Span::styled(format!("{p:.0}%"), Style::new().fg(Color::Red)),
+        p if p >= 70.0 => Span::styled(format!("{p:.0}%"), Style::new().fg(Color::Yellow)),
+        p => Span::raw(format!("{p:.0}%")),
+    }
 }
 
 fn footer(app: &App, now: At) -> TLine<'static> {
@@ -985,15 +1051,30 @@ fn footer(app: &App, now: At) -> TLine<'static> {
                 format!(" {}", f.text),
                 Style::new().fg(Color::Yellow),
             )),
-            _ if app.skills.is_some() => TLine::from(Span::styled(skills_view::FOOTER, dim())),
-            _ => TLine::from(Span::styled(
-                if app.scope.config.workspaces.is_empty() {
-                    " j/k move  l expand  ⏎ open  tab detail  r label  m move  n new  s skills  / filter  q quit"
-                } else {
-                    " j/k move  l expand  ⏎ open  tab detail  r label  m move  n new  w workspace  s skills  / filter  q quit"
-                },
-                dim(),
-            )),
+            _ if app.skills.is_some() => keys(skills_view::KEYS),
+            _ if app.scope.config.workspaces.is_empty() => keys(&[
+                ("⏎", "open"),
+                ("tab", "details"),
+                ("l", "agents"),
+                ("n", "new"),
+                ("r", "label"),
+                ("m", "move"),
+                ("s", "skills"),
+                ("/", "filter"),
+                ("?", "help"),
+            ]),
+            _ => keys(&[
+                ("⏎", "open"),
+                ("tab", "details"),
+                ("l", "agents"),
+                ("n", "new"),
+                ("r", "label"),
+                ("m", "move"),
+                ("w", "workspace"),
+                ("s", "skills"),
+                ("/", "filter"),
+                ("?", "help"),
+            ]),
         },
         Mode::Filter { input } => prompt("/", input, "⏎ keep  esc clear"),
         Mode::Label { input, .. } => prompt("label: ", input, "⏎ save (empty clears)  esc cancel"),
@@ -1025,13 +1106,16 @@ fn footer(app: &App, now: At) -> TLine<'static> {
     }
 }
 
-fn render_list(frame: &mut Frame, area: Rect, lines: &[Line], sel: Option<usize>, now: At) {
+fn render_list(frame: &mut Frame, area: Rect, lines: &[Line], sel: Option<usize>) {
     let width = usize::from(area.width);
-    let mut out: Vec<TLine> = Vec::new();
+    let mut out: Vec<TLine> = vec![TLine::from(Span::styled(
+        format!(" {:<STATUS_WIDTH$}session", "status"),
+        dim(),
+    ))];
     let mut sel_end = 0;
     for (i, line) in lines.iter().enumerate() {
         let is_sel = sel == Some(i);
-        draw_line(&mut out, line, is_sel, width, now);
+        out.push(draw_line(line, is_sel, width));
         if is_sel {
             sel_end = out.len();
         }
@@ -1043,12 +1127,9 @@ fn render_list(frame: &mut Frame, area: Rect, lines: &[Line], sel: Option<usize>
     );
 }
 
-fn draw_line(out: &mut Vec<TLine<'static>>, line: &Line, selected: bool, width: usize, now: At) {
-    let marker = Span::styled(
-        if selected { "›" } else { " " },
-        Style::new().add_modifier(Modifier::BOLD),
-    );
-    match line {
+fn draw_line(line: &Line, selected: bool, width: usize) -> TLine<'static> {
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+    let line = match line {
         Line::Header {
             group,
             title,
@@ -1058,13 +1139,13 @@ fn draw_line(out: &mut Vec<TLine<'static>>, line: &Line, selected: bool, width: 
             let style = if *group == GroupId::Auto(AutoGroup::Finished) {
                 dim()
             } else {
-                Style::new().add_modifier(Modifier::BOLD)
+                bold
             };
             let mut right = Vec::new();
             if *needs_you > 0 {
                 right.push(Span::styled(
                     format!("▲{needs_you} "),
-                    Style::new().fg(Color::Red),
+                    Look::NeedsYou.style(),
                 ));
             }
             right.push(Span::styled(format!("{count} "), dim()));
@@ -1078,82 +1159,75 @@ fn draw_line(out: &mut Vec<TLine<'static>>, line: &Line, selected: bool, width: 
                 Span::raw(" "),
             ];
             spans.extend(right);
-            out.push(TLine::from(spans));
+            TLine::from(spans)
         }
         Line::Row {
             status,
             label,
             title,
-            meta,
-            now: now_line,
-            since,
             ..
         } => {
-            let exited = status.rank() == Rank::Exited;
-            let text = if exited { dim() } else { Style::new() };
-            let right = vec![
-                Span::styled(meta_text(meta), text),
-                Span::styled(format!(" {:>3} ", elapsed(*since, now)), dim()),
-            ];
-            let mut left = vec![
-                marker,
-                Span::styled(glyph(status), status_style(status)),
-                Span::raw(" "),
-            ];
-            if let Some(l) = label {
-                left.push(Span::styled(l.clone(), text.add_modifier(Modifier::BOLD)));
-                left.push(Span::raw("  "));
+            let look = Look::of(status);
+            let name = match (selected, look) {
+                (true, _) => bold,
+                (false, Look::Ended) => dim(),
+                (false, _) => Style::new(),
+            };
+            let mut spans = vec![Span::raw(" "), look.label()];
+            let room = width.saturating_sub(spans_width(&spans) + 1);
+            match label {
+                Some(l) => {
+                    let l = truncate(l, room);
+                    let rest = room.saturating_sub(l.width() + 2);
+                    spans.push(Span::styled(l, name.add_modifier(Modifier::BOLD)));
+                    if rest > 1 {
+                        spans.push(Span::styled(
+                            format!("  {}", truncate(title.as_str(), rest)),
+                            dim(),
+                        ));
+                    }
+                }
+                None => spans.push(Span::styled(truncate(title.as_str(), room), name)),
             }
-            let room = width.saturating_sub(spans_width(&left) + spans_width(&right) + 1);
-            left.push(Span::styled(truncate(title.as_str(), room), text));
-            out.push(spread(left, right, width as u16));
-            let second = truncate(now_line.as_str(), width.saturating_sub(INDENT.len()));
-            out.push(TLine::from(vec![
-                Span::raw(INDENT),
-                Span::styled(second, dim()),
-            ]));
+            TLine::from(spans)
         }
         Line::Node {
             kind,
             state,
             label,
-            now: node_now,
-            since,
             prefix,
             ..
         } => {
             let (g, style) = node_glyph(kind, *state);
-            let model = match kind {
-                NodeKind::Agent { model: Some(m), .. } => format!("{}  ", m.as_str()),
-                _ => String::new(),
-            };
-            let right = vec![Span::styled(
-                format!("{model}{:>3} ", elapsed(*since, now)),
-                dim(),
-            )];
-            let mut left = vec![
-                marker,
-                Span::raw(format!("{}{prefix} ", &INDENT[1..])),
+            let mut spans = vec![
+                Span::styled(format!("   {prefix} "), dim()),
                 Span::styled(g, style),
                 Span::raw(" "),
-                Span::styled(kind_name(kind).to_owned(), dim()),
-                Span::raw("  "),
             ];
-            let room = width.saturating_sub(spans_width(&left) + spans_width(&right) + 1);
-            let mut text = label.as_str().to_owned();
-            if let Some(n) = node_now.as_ref().filter(|n| !n.is_empty()) {
-                text = format!("{text}  · {}", n.as_str());
-            }
-            left.push(Span::raw(truncate(&text, room)));
-            out.push(spread(left, right, width as u16));
+            let kind = kind_name(kind).to_owned();
+            spans.push(Span::styled(format!("{kind}  "), dim()));
+            let room = width.saturating_sub(spans_width(&spans) + 1);
+            spans.push(Span::raw(truncate(label.as_str(), room)));
+            TLine::from(spans)
         }
-        Line::Finished { count, prefix, .. } => {
-            out.push(TLine::from(Span::styled(
-                format!("{INDENT}{prefix} ✓ {count} finished"),
-                dim(),
-            )));
-        }
-    }
+        Line::Finished { count, prefix, .. } => TLine::from(Span::styled(
+            format!("   {prefix} ✓ {count} finished"),
+            dim(),
+        )),
+    };
+    if selected { band(line, width) } else { line }
+}
+
+/// Paints the selection band behind a whole line.
+fn band(line: TLine<'static>, width: usize) -> TLine<'static> {
+    let mut spans: Vec<Span<'static>> = line
+        .spans
+        .into_iter()
+        .map(|s| Span::styled(s.content, s.style.bg(BAND)))
+        .collect();
+    let pad = width.saturating_sub(spans_width(&spans));
+    spans.push(Span::styled(" ".repeat(pad), Style::new().bg(BAND)));
+    TLine::from(spans)
 }
 
 fn node_glyph(kind: &NodeKind, state: NodeState) -> (&'static str, Style) {
@@ -1183,142 +1257,379 @@ fn kind_name(kind: &NodeKind) -> &str {
     }
 }
 
-fn meta_text(meta: &Meta) -> String {
-    let mut parts = Vec::new();
-    if meta.remote_control {
-        parts.push("⇄".to_owned());
-    }
-    let mut place: Vec<&str> = Vec::new();
-    if !meta.dir_tag.is_empty() {
-        place.push(&meta.dir_tag);
-    }
-    if meta.bg {
-        place.push("bg");
-    }
+/// Where the session works: branch or worktree, then its PRs.
+fn place(meta: &Meta) -> String {
+    let mut parts: Vec<String> = Vec::new();
     if let Some(b) = meta.branch.as_ref().or(meta.worktree.as_ref()) {
-        place.push(b.as_str());
+        parts.push(b.as_str().to_owned());
     }
-    let mut place = place.join(" · ");
-    if let Some(pr) = meta.prs.last() {
-        let more = if meta.prs.len() > 1 {
-            format!("+{}", meta.prs.len() - 1)
-        } else {
-            String::new()
-        };
-        place = format!("{place} #{pr}{more}").trim_start().to_owned();
-    }
-    if !place.is_empty() {
-        parts.push(place);
-    }
-    match meta.ctx {
-        Some(Ctx::Percent(p)) => parts.push(format!("{p}%")),
-        Some(Ctx::Tokens(t)) if t >= 1_000_000 => parts.push(format!("{:.1}M", t as f64 / 1e6)),
-        Some(Ctx::Tokens(t)) if t >= 1_000 => parts.push(format!("{}k", t / 1000)),
-        Some(Ctx::Tokens(t)) => parts.push(t.to_string()),
-        None => {}
-    }
-    if let Some(Cost::Live(c) | Cost::Final(c)) = meta.cost {
-        parts.push(format!("${c:.2}"));
-    }
+    parts.extend(meta.prs.iter().map(|pr| format!("#{pr}")));
     parts.join("  ")
 }
 
-fn render_detail(frame: &mut Frame, area: Rect, row: &Row, user: &UserState, border: Borders) {
-    let d = &row.detail;
-    let mut text = vec![TLine::from(Span::styled(
-        row.title.as_str().to_owned(),
-        Style::new().add_modifier(Modifier::BOLD),
-    ))];
-    let mut section = |name: &str, lines: Vec<String>| {
-        text.push(TLine::raw(""));
-        text.push(TLine::from(Span::styled(name.to_owned(), dim())));
-        text.extend(lines.into_iter().map(TLine::raw));
+/// A bar `cells` wide filled to `pct`. Only a nearly full context gets colour.
+fn gauge(pct: u8, cells: usize) -> Vec<Span<'static>> {
+    let filled = (usize::from(pct) * cells).div_ceil(100).min(cells);
+    let used = match pct {
+        p if p >= 90 => Style::new().fg(Color::Red),
+        p if p >= 70 => Style::new().fg(Color::Yellow),
+        _ => Style::new(),
     };
-    if let Some(l) = user.entry(&row.user_key).and_then(|e| e.label.clone()) {
-        section("label", vec![l]);
+    vec![
+        Span::styled("━".repeat(filled), used),
+        Span::styled("─".repeat(cells - filled), dim()),
+    ]
+}
+
+fn context(ctx: Ctx) -> Vec<Span<'static>> {
+    match ctx {
+        Ctx::Percent(p) => {
+            let mut out = gauge(p, 12);
+            out.push(Span::raw(format!(" {p}%")));
+            out
+        }
+        Ctx::Tokens(t) if t >= 1_000_000 => {
+            vec![Span::raw(format!("{:.1}M tokens", t as f64 / 1e6))]
+        }
+        Ctx::Tokens(t) if t >= 1_000 => vec![Span::raw(format!("{}k tokens", t / 1000))],
+        Ctx::Tokens(t) => vec![Span::raw(format!("{t} tokens"))],
     }
-    if let Some(p) = &d.last_prompt {
-        section("last prompt", vec![p.as_str().to_owned()]);
+}
+
+fn home_relative(path: &std::path::Path) -> String {
+    match dirs::home_dir().and_then(|h| path.strip_prefix(h).ok().map(PathBuf::from)) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
-    if let Some(t) = &d.last_text {
-        section("last reply", vec![t.as_str().to_owned()]);
-    }
-    for (name, items) in [("open tasks", &d.open_tasks), ("pending", &d.pending)] {
-        if !items.is_empty() {
-            section(
-                name,
-                items.iter().map(|s| format!("· {}", s.as_str())).collect(),
-            );
+}
+
+/// Word-wraps `text` to `width` columns, splitting words longer than a line.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        if !cur.is_empty() && cur.width() + 1 + word.width() > width {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        for c in word.chars() {
+            if cur.width() + c.width().unwrap_or(0) > width {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur.push(c);
         }
     }
-    for (name, path) in [("cwd", &d.cwd), ("config dir", &d.config_dir)] {
-        if !path.as_os_str().is_empty() {
-            section(name, vec![path.display().to_string()]);
-        }
+    if !cur.is_empty() {
+        out.push(cur);
     }
-    if let Some(s) = &d.session_id {
-        section("session", vec![s.0.clone()]);
-    }
-    if let Some(j) = &d.job_id {
-        section("job", vec![j.0.clone()]);
-    }
+    out
+}
+
+/// The details pane: what the session is doing, the facts the list leaves out, then its
+/// conversation and ids. Labels sit right-aligned in one column.
+fn render_detail(
+    frame: &mut Frame,
+    area: Rect,
+    row: &Row,
+    label: Option<&str>,
+    border: Borders,
+    now: At,
+) {
+    const KEY: usize = 8;
     let block = Block::new()
         .borders(border)
         .border_style(dim())
-        .padding(ratatui::widgets::Padding::horizontal(1));
-    frame.render_widget(
-        Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
-        area,
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let width = usize::from(inner.width);
+    let text_w = width.saturating_sub(KEY + 1);
+    let d = &row.detail;
+    let look = Look::of(&row.status);
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+
+    let mut out = vec![spread(
+        vec![Span::styled(
+            truncate(
+                label.unwrap_or(row.title.as_str()),
+                width.saturating_sub(14),
+            ),
+            bold,
+        )],
+        vec![Span::styled(
+            format!("{} {}", look.glyph(), look.word()),
+            look.style(),
+        )],
+        inner.width,
+    )];
+    if label.is_some() {
+        out.push(TLine::from(Span::styled(
+            row.title.as_str().to_owned(),
+            dim(),
+        )));
+    }
+    out.push(TLine::raw(""));
+    let fact = |out: &mut Vec<TLine<'static>>, key: &str, value: Vec<Span<'static>>| {
+        let mut spans = vec![Span::styled(format!("{key:>KEY$} "), dim())];
+        spans.extend(value);
+        out.push(TLine::from(spans));
+    };
+    let para = |out: &mut Vec<TLine<'static>>, key: &str, text: &str, style: Style| {
+        for (i, l) in wrap(text, text_w).into_iter().enumerate() {
+            let key = if i == 0 { key } else { "" };
+            out.push(TLine::from(vec![
+                Span::styled(format!("{key:>KEY$} "), dim()),
+                Span::styled(l, style),
+            ]));
+        }
+    };
+
+    para(&mut out, "now", row.now.as_str(), Style::new());
+    let meta = &row.meta;
+    let place = place(meta);
+    if !place.is_empty() {
+        fact(&mut out, "branch", vec![Span::raw(place)]);
+    }
+    if let Some(ctx) = meta.ctx {
+        fact(&mut out, "context", context(ctx));
+    }
+    if let Some(Cost::Live(c) | Cost::Final(c)) = meta.cost {
+        fact(&mut out, "cost", vec![Span::raw(format!("${c:.2}"))]);
+    }
+    fact(
+        &mut out,
+        "age",
+        vec![Span::raw(format!("{} ago", elapsed(row.since, now)))],
     );
+    let mut runs = match &d.job_id {
+        Some(j) => format!("bg job {}", j.0),
+        None if meta.bg => "bg job".to_owned(),
+        None => "tmux pane".to_owned(),
+    };
+    if !meta.dir_tag.is_empty() {
+        runs = format!("{runs} on {}", meta.dir_tag);
+    }
+    if meta.remote_control {
+        runs.push_str(", remote control on");
+    }
+    fact(&mut out, "runs as", vec![Span::raw(runs)]);
+
+    let tree = &row.tree;
+    if !tree.is_empty() {
+        out.push(TLine::raw(""));
+    }
+    for (i, node) in tree.live.iter().enumerate() {
+        let (g, style) = node_glyph(&node.kind, node.state);
+        let key = if i == 0 { "agents" } else { "" };
+        fact(
+            &mut out,
+            key,
+            vec![
+                Span::styled(format!("{g} "), style),
+                Span::styled(format!("{}  ", kind_name(&node.kind)), dim()),
+                Span::raw(truncate(node.label.as_str(), text_w.saturating_sub(16))),
+                Span::styled(format!("  {}", elapsed(node.since, now)), dim()),
+            ],
+        );
+        if let Some(n) = node.now.as_ref().filter(|n| !n.is_empty()) {
+            para(&mut out, "", &format!("  {}", n.as_str()), dim());
+        }
+    }
+    if tree.finished > 0 {
+        let key = if tree.live.is_empty() { "agents" } else { "" };
+        fact(
+            &mut out,
+            key,
+            vec![Span::styled(format!("✓ {} finished", tree.finished), dim())],
+        );
+    }
+
+    if let Some(p) = &d.last_prompt {
+        out.push(TLine::raw(""));
+        para(
+            &mut out,
+            "you",
+            p.as_str(),
+            Style::new().add_modifier(Modifier::ITALIC),
+        );
+    }
+    if let Some(t) = &d.last_text {
+        out.push(TLine::raw(""));
+        para(&mut out, "claude", t.as_str(), Style::new());
+    }
+    for (name, items) in [("tasks", &d.open_tasks), ("pending", &d.pending)] {
+        if !items.is_empty() {
+            out.push(TLine::raw(""));
+        }
+        for (i, item) in items.iter().enumerate() {
+            let key = if i == 0 { name } else { "" };
+            para(&mut out, key, &format!("· {}", item.as_str()), Style::new());
+        }
+    }
+
+    out.push(TLine::raw(""));
+    for (name, path) in [("folder", &d.cwd), ("config", &d.config_dir)] {
+        if !path.as_os_str().is_empty() {
+            para(&mut out, name, &home_relative(path), dim());
+        }
+    }
+    if let Some(s) = &d.session_id {
+        fact(&mut out, "session", vec![Span::styled(s.0.clone(), dim())]);
+    }
+    frame.render_widget(Paragraph::new(out), inner);
 }
 
-fn render_help(frame: &mut Frame, body: Rect, snap: &Snapshot) {
-    let mut text: Vec<TLine> = [
-        "j/k ↑/↓   move            g/G   top / bottom",
-        "l → space expand          h ←   collapse",
-        "⏎         jump to the pane, or attach a bg job here (^Z back)",
-        "tab p     detail pane     r     label",
-        "m         move to group (- automatic)",
-        "n         new bg claude here, attached (cwd, group; the",
-        "          workspace account with the most room, tab picks)",
-        "w         next workspace, then all",
-        "s         skills across accounts: ⏎ starts a share-skill",
-        "          agent, x keeps a skill local, r rescans",
-        "5h 7d     account usage  ↺ reset since seen  bold: n's pick",
-        "/         filter          q esc quit",
-        "",
-        "▲ needs you  ● working  ◐ parked  ? asked a question  ○ idle  · exited",
-    ]
-    .into_iter()
-    .map(TLine::raw)
-    .collect();
-    text.push(TLine::raw(""));
+/// Keys as bold names with dim descriptions, for footers.
+fn keys(pairs: &[(&str, &str)]) -> TLine<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (key, what) in pairs {
+        spans.push(Span::styled(
+            key.to_string(),
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(format!(" {what}   "), dim()));
+    }
+    TLine::from(spans)
+}
+
+/// Keys grouped by what they're for, a legend of the status marks, what the usage numbers
+/// mean, and any problems reading Claude Code's files.
+fn render_help(frame: &mut Frame, body: Rect, app: &App, snap: &Snapshot) {
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+    let column = |title: &str, rows: &[(&str, &str)]| -> Vec<TLine<'static>> {
+        let mut out = vec![
+            TLine::from(Span::styled(title.to_owned(), bold)),
+            TLine::raw(""),
+        ];
+        for (key, what) in rows {
+            out.push(TLine::from(vec![
+                Span::styled(format!("{key:>5}  "), Style::new().fg(Color::Cyan)),
+                Span::raw(what.to_string()),
+            ]));
+        }
+        out
+    };
+    let mut around = vec![
+        ("j k", "up and down"),
+        ("g G", "top and bottom"),
+        ("/", "filter by any text"),
+    ];
+    if !app.scope.config.workspaces.is_empty() {
+        around.push(("w", "next workspace, then all"));
+    }
+    around.extend([
+        ("s", "skills across accounts"),
+        ("?", "this help"),
+        ("q", "quit"),
+    ]);
+    let mut legend = vec![
+        TLine::from(Span::styled("What the marks mean", bold)),
+        TLine::raw(""),
+    ];
+    for look in Look::ALL {
+        legend.push(TLine::from(vec![
+            look.label(),
+            Span::styled(look.meaning(), dim()),
+        ]));
+    }
+    let columns = [
+        column("Get around", &around),
+        column(
+            "Act on a session",
+            &[
+                ("⏎", "open it (^Z comes back)"),
+                ("tab", "details"),
+                ("l h", "show or hide its agents"),
+                ("n", "start a new one here"),
+                ("r", "label it"),
+                ("m", "move to a group"),
+            ],
+        ),
+        legend,
+    ];
+
+    let mut notes = vec![
+        TLine::from(vec![
+            Span::styled("Account use  ", bold),
+            Span::styled(
+                "5h and 7d: each account's 5-hour and 7-day limit. fresh: reset since last seen.",
+                dim(),
+            ),
+        ]),
+        TLine::from(Span::styled(
+            "             n starts new sessions on the bold account, the one with the most room.",
+            dim(),
+        )),
+        TLine::raw(""),
+    ];
     if snap.diagnostics.is_empty() {
-        text.push(TLine::from(Span::styled("no diagnostics", dim())));
+        notes.push(TLine::from(Span::styled(
+            "No problems reading Claude Code's files.",
+            dim(),
+        )));
     } else {
-        text.push(TLine::from(Span::styled(
-            format!("⚠ {} diagnostics", snap.diagnostics.len()),
+        notes.push(TLine::from(Span::styled(
+            match snap.diagnostics.len() {
+                1 => "⚠ 1 problem reading Claude Code's files".to_owned(),
+                n => format!("⚠ {n} problems reading Claude Code's files"),
+            },
             Style::new().fg(Color::Yellow),
         )));
         for d in &snap.diagnostics {
-            text.push(TLine::raw(format!(
-                "{:?}  {}  {}",
-                d.source,
-                problem_text(&d.problem),
-                d.path
+            notes.push(TLine::from(Span::styled(
+                format!("{:?}  {}  {}", d.source, problem_text(&d.problem), d.path),
+                dim(),
             )));
         }
     }
-    let area = centered(body, 76, text.len() as u16 + 2);
+
+    // As many columns across as fit, each band as tall as its tallest column.
+    const COLUMN_X: [u16; 3] = [0, 32, 68];
+    let width = body.width.min(112);
+    let inner_w = width.saturating_sub(6);
+    let across = match inner_w {
+        104.. => 3,
+        64.. => 2,
+        _ => 1,
+    };
+    let bands: Vec<&[Vec<TLine>]> = columns.chunks(across).collect();
+    let band_h: Vec<usize> = bands
+        .iter()
+        .map(|b| b.iter().map(Vec::len).max().unwrap_or(0) + 1)
+        .collect();
+    let cols_h: usize = band_h.iter().sum();
+    let height = u16::try_from(cols_h + notes.len() + 3).unwrap_or(u16::MAX);
+    let area = centered(body, width, height);
     frame.render_widget(Clear, area);
     let block = Block::bordered()
-        .title(" help ")
         .border_style(dim())
-        .padding(ratatui::widgets::Padding::horizontal(1));
-    frame.render_widget(
-        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
-        area,
-    );
+        .title(Span::styled(" keys ", bold))
+        .padding(Padding::new(2, 2, 1, 0));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut y = inner.y;
+    for (band, h) in bands.into_iter().zip(band_h) {
+        let h = u16::try_from(h).unwrap_or(u16::MAX).min(inner.bottom() - y);
+        for (x, col) in COLUMN_X.into_iter().zip(band) {
+            let r = Rect {
+                x: inner.x + x,
+                y,
+                width: inner.width.saturating_sub(x),
+                height: h,
+            };
+            frame.render_widget(Paragraph::new(col.clone()), r);
+        }
+        y += h;
+    }
+    let below = Rect {
+        y,
+        height: inner.bottom() - y,
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(notes), below);
 }
 
 fn problem_text(p: &Problem) -> String {
@@ -1412,21 +1723,6 @@ fn truncate(s: &str, max: usize) -> String {
         out.push('…');
     }
     out
-}
-
-pub fn glyph(status: &Status) -> &'static str {
-    match status {
-        Status::NeedsYou(_) => "▲",
-        Status::Working => "●",
-        Status::Parked(_) => "◐",
-        Status::Idle {
-            asked_question: true,
-        } => "?",
-        Status::Idle {
-            asked_question: false,
-        } => "○",
-        Status::Exited(_) => "·",
-    }
 }
 
 pub fn elapsed(since: At, now: At) -> String {
@@ -2063,7 +2359,7 @@ mod tests {
             .unwrap();
         let top = buffer_text(term.backend().buffer());
         let top = top.lines().next().unwrap();
-        assert!(top.contains("personal 7d 52%  wukong 7d ↺"), "{top}");
+        assert!(top.contains("personal 7d 52%  wukong 7d fresh"), "{top}");
         let buf = term.backend().buffer();
         let x = top.find("wukong").unwrap();
         let x = u16::try_from(top[..x].chars().count()).unwrap();
@@ -2340,19 +2636,24 @@ mod tests {
         update(&mut app, &s, &user, Input::Done(Outcome::Skills(inv)), NOW);
         let text = skills_text(&app, &user);
         assert!(text[0].starts_with(" agentty · all · skills"), "{text:?}");
-        assert_eq!(text[1], "  skill        personal  wukong  jnj");
         assert_eq!(
-            text[2],
-            "› jot          ●         →       ·    missing on jnj"
+            text[1..10],
+            [
+                "                personal  wukong  jnj",
+                "",
+                " Needs sharing  2",
+                " ▌ jot          ●         →       ·    Missing on jnj",
+                "                ⏎ starts a share-skill agent that keeps one copy and links it into every account",
+                "   verify       ·         ·       ●    Missing on personal and wukong",
+                "",
+                " Shared everywhere  1",
+                "   danger-keys  ●         →       →",
+            ],
+            "{text:#?}"
         );
-        assert_eq!(
-            text[3],
-            "  verify       ·         ·       ●    missing on personal, wukong"
-        );
-        assert_eq!(text[4], "  danger-keys  ●         →       →    shared");
         assert!(
-            text[5].contains("one skills folder: personal = wukong"),
-            "{text:?}"
+            text[11].ends_with("personal and wukong share one skills folder"),
+            "{text:#?}"
         );
 
         let x = press(&mut app, &s, &user, &[Key::Char('j'), Key::Char('x')]);
@@ -2363,9 +2664,15 @@ mod tests {
         assert_eq!(x, [Effect::Commit(local.clone())]);
         user.apply(&local);
         let text = skills_text(&app, &user);
-        assert!(
-            text[4].starts_with("› verify") && text[4].ends_with("keep local"),
-            "{text:?}"
+        assert_eq!(
+            text[9..13],
+            [
+                " Kept local  1",
+                " ▌ verify       ·         ·       ●    Kept on these accounts only",
+                "                x shares it again",
+                "",
+            ],
+            "{text:#?}"
         );
         assert_eq!(
             press(&mut app, &s, &user, &[Key::Char('x')]),
@@ -2511,33 +2818,58 @@ mod tests {
         label(&mut user, &s.rows[0], "auth-race");
         let mut app = App::new(false);
         app.expanded.insert(key(1));
-        let backend = ratatui::backend::TestBackend::new(100, 30);
-        let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| render(f, &app, &s, &user, NOW)).unwrap();
-        let text = buffer_text(term.backend().buffer());
+        let draw = |app: &App| {
+            let mut term = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| render(f, app, &s, &user, NOW)).unwrap();
+            term.backend().buffer().clone()
+        };
+        let buf = draw(&app);
+        let text = buffer_text(&buf);
         let lines: Vec<&str> = text.lines().collect();
         assert!(
-            lines[0].starts_with(" agentty  3 live · 1 needs you · 1 parked"),
+            lines[0].starts_with(" agentty  3 live · 1 needs you · 1 your turn · 1 waiting"),
             "{text}"
         );
         assert!(lines[0].ends_with("⚠ 1  ? help"), "{text}");
+        assert_eq!(lines[1], " status       session");
         assert!(
-            lines[1].starts_with(" jnj-web ─") && lines[1].ends_with("▲1 1"),
+            lines[2].starts_with(" jnj-web ─") && lines[2].ends_with("▲1 1"),
             "{text}"
         );
-        assert!(
-            lines[2].starts_with("›▲ auth-race  Fix token refresh race"),
-            "{text}"
-        );
-        assert!(
-            lines[2].ends_with("feat/auth-race #4812  412k  3m"),
-            "{text}"
-        );
-        assert_eq!(lines[3], "     permission prompt · Bash");
+        assert_eq!(lines[3], " ▲ needs you  auth-race  Fix token refresh race");
+        assert_eq!(buf[(0, 3)].bg, BAND, "the selected row is banded");
+        assert_eq!(buf[(0, 5)].bg, Color::Reset);
+        assert!(!text.contains("feat/auth-race"), "{text}");
+        assert!(!text.contains("permission prompt"), "{text}");
         assert!(text.contains("│  ├─ ● Explore  a1"), "{text}");
         assert!(text.contains("├─ ✓ monitor  mon"), "{text}");
-        assert!(text.contains("     └─ ✓ 4 finished"), "{text}");
-        assert!(text.contains(" ? quiet"), "{text}");
-        assert!(lines[29].starts_with(" j/k move"), "{text}");
+        assert!(text.contains("   └─ ✓ 4 finished"), "{text}");
+        assert!(text.contains(" ? your turn  quiet"), "{text}");
+        assert!(lines[29].starts_with(" ⏎ open   tab details"), "{text}");
+
+        app.detail = true;
+        let text = buffer_text(&draw(&app));
+        for fact in [
+            "▲ needs you",
+            "     now permission prompt · Bash",
+            "  branch feat/auth-race  #4812",
+            " context 412k tokens",
+            "     age 3m ago",
+        ] {
+            assert!(text.contains(fact), "{fact:?} missing from\n{text}");
+        }
+
+        app.mode = Mode::Help;
+        let text = buffer_text(&draw(&app));
+        for part in [
+            "Get around",
+            "Act on a session",
+            "What the marks mean",
+            "? your turn  replied with a question",
+            "⚠ 1 problem reading Claude Code's files",
+            "Registry  unparsable  ~/.claude/sessions/1.json",
+        ] {
+            assert!(text.contains(part), "{part:?} missing from\n{text}");
+        }
     }
 }

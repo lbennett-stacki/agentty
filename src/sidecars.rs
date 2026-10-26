@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::model::{At, ConfigDir, PaneId, Problem, SafeText, SessionId, nonempty};
+use crate::model::{At, ConfigDir, Limits, PaneId, Problem, SafeText, SessionId, Window, nonempty};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Task {
@@ -59,6 +59,8 @@ pub struct Statusline {
     pub ctx_used_pct: Option<f64>,
     pub window: Option<u64>,
     pub cost_usd: Option<f64>,
+    /// Present only for subscription accounts, after the session's first API response.
+    pub limits: Option<Limits>,
     pub at: At,
 }
 
@@ -66,6 +68,29 @@ pub struct Statusline {
 struct WireStatusline {
     context_window: Option<WireCtxWindow>,
     cost: Option<WireCost>,
+    rate_limits: Option<WireRateLimits>,
+}
+
+#[derive(Deserialize)]
+struct WireRateLimits {
+    five_hour: Option<WireRateWindow>,
+    seven_day: Option<WireRateWindow>,
+}
+
+#[derive(Deserialize)]
+struct WireRateWindow {
+    used_percentage: Option<f64>,
+    /// Unix epoch seconds.
+    resets_at: Option<f64>,
+}
+
+impl WireRateWindow {
+    fn window(self) -> Option<Window> {
+        Some(Window {
+            used_pct: self.used_percentage?,
+            resets_at: At((self.resets_at? * 1000.0) as i64),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -88,8 +113,73 @@ pub fn parse_statusline(bytes: &[u8], mtime: At) -> Result<Statusline, Problem> 
             .as_ref()
             .and_then(|c| c.context_window_size),
         cost_usd: w.cost.and_then(|c| c.total_cost_usd),
+        limits: w.rate_limits.map(|r| Limits {
+            five_hour: r.five_hour.and_then(WireRateWindow::window),
+            seven_day: r.seven_day.and_then(WireRateWindow::window),
+            at: mtime,
+        }),
         at: mtime,
     })
+}
+
+/// The file where Claude Code keeps an account's global config: `~/.claude.json` for the default
+/// `~/.claude`, `<dir>/.claude.json` for any `CLAUDE_CONFIG_DIR`.
+pub fn account_file(home: &Path, dir: &ConfigDir) -> PathBuf {
+    if dir.0 == home.join(".claude") {
+        home.join(".claude.json")
+    } else {
+        dir.0.join(".claude.json")
+    }
+}
+
+// The account file also holds the account's email and org. Only the usage cache is declared, so
+// nothing else is ever materialised.
+#[derive(Deserialize)]
+struct WireAccountFile {
+    #[serde(rename = "cachedUsageUtilization")]
+    usage: Option<WireUsageCache>,
+}
+
+#[derive(Deserialize)]
+struct WireUsageCache {
+    #[serde(rename = "fetchedAtMs")]
+    fetched_at_ms: Option<i64>,
+    utilization: Option<WireUtilization>,
+}
+
+#[derive(Deserialize)]
+struct WireUtilization {
+    five_hour: Option<WireCacheWindow>,
+    seven_day: Option<WireCacheWindow>,
+}
+
+#[derive(Deserialize)]
+struct WireCacheWindow {
+    utilization: Option<f64>,
+    resets_at: Option<String>,
+}
+
+impl WireCacheWindow {
+    fn window(self) -> Option<Window> {
+        Some(Window {
+            used_pct: self.utilization?,
+            resets_at: At::parse_iso(&self.resets_at?)?,
+        })
+    }
+}
+
+/// Reads the usage Claude Code cached the last time `/usage` fetched it. It can be days old;
+/// `Limits::merge` prefers a newer statusline observation.
+pub fn parse_limits_cache(bytes: &[u8]) -> Result<Option<Limits>, Problem> {
+    let w: WireAccountFile = serde_json::from_slice(bytes).map_err(|_| Problem::Unparsable)?;
+    Ok(w.usage.and_then(|c| {
+        let u = c.utilization?;
+        Some(Limits {
+            five_hour: u.five_hour.and_then(WireCacheWindow::window),
+            seven_day: u.seven_day.and_then(WireCacheWindow::window),
+            at: At(c.fetched_at_ms?),
+        })
+    }))
 }
 
 pub fn statusline_dir(cache_root: &Path) -> PathBuf {
@@ -234,6 +324,7 @@ mod tests {
                 ctx_used_pct: Some(12.5),
                 window: Some(200000),
                 cost_usd: Some(0.75),
+                limits: None,
                 at: At(7)
             }
         );
@@ -244,10 +335,80 @@ mod tests {
                 ctx_used_pct: None,
                 window: None,
                 cost_usd: None,
+                limits: None,
                 at: At(8)
             }
         );
         assert_eq!(parse_statusline(b"{", At(9)), Err(Problem::Unparsable));
+    }
+
+    #[test]
+    fn statusline_rate_limits_become_usage_observed_at_the_file_mtime() {
+        let s = parse_statusline(
+            br#"{"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1738425600},"seven_day":{"used_percentage":41.2,"resets_at":1738857600}}}"#,
+            At(9),
+        )
+        .unwrap();
+        assert_eq!(
+            s.limits,
+            Some(Limits {
+                five_hour: Some(Window {
+                    used_pct: 23.5,
+                    resets_at: At(1_738_425_600_000)
+                }),
+                seven_day: Some(Window {
+                    used_pct: 41.2,
+                    resets_at: At(1_738_857_600_000)
+                }),
+                at: At(9)
+            })
+        );
+        let dropped = parse_statusline(
+            br#"{"rate_limits":{"seven_day":{"used_percentage":5,"resets_at":1738857600}}}"#,
+            At(9),
+        )
+        .unwrap();
+        assert_eq!(dropped.limits.unwrap().five_hour, None);
+    }
+
+    #[test]
+    fn limits_cache_reads_only_the_cached_utilization() {
+        // Shape captured from Claude Code 2.1.310's `.claude.json`, trimmed.
+        let bytes = br#"{
+            "oauthAccount": {"emailAddress": "SECRET_SENTINEL_x9"},
+            "cachedUsageUtilization": {
+                "fetchedAtMs": 1792863195015,
+                "accountUuid": "f7f66a7a",
+                "utilization": {
+                    "five_hour": {"utilization": 100, "resets_at": "2026-10-24T20:29:59.584178+00:00", "limit_dollars": null},
+                    "seven_day": {"utilization": 52, "resets_at": "2026-10-29T18:59:59.584203+00:00"},
+                    "seven_day_opus": null
+                }
+            }
+        }"#;
+        let u = parse_limits_cache(bytes).unwrap().unwrap();
+        assert_eq!(u.at, At(1_792_863_195_015));
+        assert_eq!(u.five_hour.unwrap().used_pct, 100.0);
+        assert_eq!(
+            u.seven_day.unwrap().resets_at,
+            At::parse_iso("2026-10-29T18:59:59.584203+00:00").unwrap()
+        );
+        assert!(!format!("{u:?}").contains("SECRET_SENTINEL_x9"));
+        assert_eq!(parse_limits_cache(br#"{"projects":{}}"#), Ok(None));
+        assert_eq!(parse_limits_cache(b"{"), Err(Problem::Unparsable));
+    }
+
+    #[test]
+    fn the_default_account_keeps_its_file_in_home() {
+        let home = Path::new("/Users/u");
+        assert_eq!(
+            account_file(home, &ConfigDir(home.join(".claude"))),
+            home.join(".claude.json")
+        );
+        assert_eq!(
+            account_file(home, &ConfigDir(home.join(".claude-wukong"))),
+            home.join(".claude-wukong/.claude.json")
+        );
     }
 
     #[test]

@@ -10,10 +10,12 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::config::{Config, Workspace};
+use crate::derive::roomiest;
 use crate::model::{
     At, AutoGroup, ConfigDir, Cost, Ctx, Effect, GroupId, GroupName, Meta, NodeKind, NodeState, Op,
     OpenTarget, Outcome, Problem, Rank, Row, RowKey, SafeText, Snapshot, Status, TaskId, Tree,
-    UserKey, row_order,
+    UserKey, Window, row_order,
 };
 use crate::user_state::UserState;
 
@@ -30,6 +32,16 @@ pub struct App {
     filter: String,
     mode: Mode,
     flash: Option<Flash>,
+    scope: Scope,
+}
+
+#[derive(Debug, Default)]
+struct Scope {
+    config: Config,
+    /// The workspace on screen, or every session when `None`.
+    current: Option<usize>,
+    /// Where agentty started: `n` starts here when no row is selected.
+    cwd: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -63,7 +75,8 @@ pub enum Mode {
         options: Vec<GroupName>,
     },
     NewSession {
-        dir: ConfigDir,
+        accounts: Vec<ConfigDir>,
+        choice: usize,
         cwd: PathBuf,
         group: Option<GroupName>,
         input: String,
@@ -131,6 +144,33 @@ impl App {
             filter: String::new(),
             mode: Mode::Normal,
             flash: None,
+            scope: Scope::default(),
+        }
+    }
+
+    pub fn scoped(mut self, config: Config, current: Option<usize>, cwd: PathBuf) -> App {
+        self.scope = Scope {
+            config,
+            current,
+            cwd,
+        };
+        self
+    }
+
+    fn workspace(&self) -> Option<&Workspace> {
+        self.scope.current.map(|i| &self.scope.config.workspaces[i])
+    }
+
+    fn in_scope(&self, row: &Row) -> bool {
+        self.workspace()
+            .is_none_or(|w| row.detail.cwd.starts_with(&w.root))
+    }
+
+    fn start_dir(&self, w: &Workspace) -> PathBuf {
+        if self.scope.cwd.starts_with(&w.root) {
+            self.scope.cwd.clone()
+        } else {
+            w.root.clone()
         }
     }
 
@@ -243,22 +283,28 @@ pub fn update(
             vec![]
         }
         Mode::NewSession {
-            dir,
+            accounts,
+            mut choice,
             cwd,
             group,
             mut input,
         } => match key {
             Key::Enter => vec![Effect::NewSession {
-                dir,
+                dir: accounts[choice].clone(),
                 cwd,
                 group,
                 name: non_empty(&input),
             }],
             Key::Esc => vec![],
             _ => {
-                edit(&mut input, key);
+                if key == Key::Tab {
+                    choice = (choice + 1) % accounts.len();
+                } else {
+                    edit(&mut input, key);
+                }
                 app.mode = Mode::NewSession {
-                    dir,
+                    accounts,
+                    choice,
                     cwd,
                     group,
                     input,
@@ -345,12 +391,34 @@ fn normal(
             }
         }
         Key::Char('n') => {
-            if let Some(r) = row {
-                app.mode = Mode::NewSession {
-                    dir: row_dir(&r.key).clone(),
-                    cwd: r.detail.cwd.clone(),
-                    group: user_group(user, r).cloned(),
-                    input: String::new(),
+            let (accounts, cwd) = match (app.workspace(), row) {
+                (Some(w), _) => (
+                    w.accounts.clone(),
+                    row.map_or_else(|| app.start_dir(w), |r| r.detail.cwd.clone()),
+                ),
+                (None, Some(r)) => (vec![row_dir(&r.key).clone()], r.detail.cwd.clone()),
+                (None, None) => return vec![],
+            };
+            app.mode = Mode::NewSession {
+                choice: roomiest(&accounts, &snap.limits, now),
+                accounts,
+                cwd,
+                group: row.and_then(|r| user_group(user, r).cloned()),
+                input: String::new(),
+            };
+        }
+        Key::Char('w') => {
+            let n = app.scope.config.workspaces.len();
+            if n == 0 {
+                app.flash(
+                    "no workspaces: add them to ~/.config/agentty/config.toml".into(),
+                    now,
+                );
+            } else {
+                app.scope.current = match app.scope.current {
+                    None => Some(0),
+                    Some(i) if i + 1 < n => Some(i + 1),
+                    Some(_) => None,
                 };
             }
         }
@@ -533,7 +601,7 @@ impl Line {
 pub fn layout(snap: &Snapshot, user: &UserState, app: &App) -> Vec<Line> {
     let needle = app.filter_text().to_lowercase();
     let mut groups: BTreeMap<GroupId, Vec<&Row>> = BTreeMap::new();
-    for row in &snap.rows {
+    for row in snap.rows.iter().filter(|r| app.in_scope(r)) {
         groups.entry(group_of(row, user)).or_default().push(row);
     }
     let mut out = Vec::new();
@@ -656,7 +724,7 @@ pub fn render(frame: &mut Frame, app: &App, snap: &Snapshot, user: &UserState, n
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    frame.render_widget(Paragraph::new(header(snap, top.width)), top);
+    frame.render_widget(Paragraph::new(header(app, snap, now, top.width)), top);
 
     let current = sel
         .and_then(|i| lines[i].target())
@@ -750,17 +818,21 @@ fn status_style(status: &Status) -> Style {
     }
 }
 
-fn header(snap: &Snapshot, width: u16) -> TLine<'static> {
-    let live = snap
-        .rows
+fn header(app: &App, snap: &Snapshot, now: At, width: u16) -> TLine<'static> {
+    let rows: Vec<&Row> = snap.rows.iter().filter(|r| app.in_scope(r)).collect();
+    let live = rows
         .iter()
         .filter(|r| matches!(r.key, RowKey::Live { .. }))
         .count();
-    let count = |rank| snap.rows.iter().filter(|r| r.status.rank() == rank).count();
-    let mut left = vec![
-        Span::styled(" agentty", Style::new().add_modifier(Modifier::BOLD)),
-        Span::raw(format!("  {live} live")),
-    ];
+    let count = |rank| rows.iter().filter(|r| r.status.rank() == rank).count();
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+    let mut left = vec![Span::styled(" agentty", bold)];
+    match app.workspace() {
+        Some(w) => left.push(Span::styled(format!(" · {}", w.name), bold)),
+        None if !app.scope.config.workspaces.is_empty() => left.push(Span::styled(" · all", dim())),
+        None => {}
+    }
+    left.push(Span::raw(format!("  {live} live")));
     for (rank, what, color) in [
         (Rank::NeedsYou, "needs you", Color::Red),
         (Rank::Parked, "parked", Color::Yellow),
@@ -771,7 +843,7 @@ fn header(snap: &Snapshot, width: u16) -> TLine<'static> {
             left.push(Span::styled(format!("{n} {what}"), Style::new().fg(color)));
         }
     }
-    let mut right = Vec::new();
+    let mut right = limits_spans(app, snap, now);
     if !snap.diagnostics.is_empty() {
         right.push(Span::styled(
             format!("⚠ {}", snap.diagnostics.len()),
@@ -781,6 +853,64 @@ fn header(snap: &Snapshot, width: u16) -> TLine<'static> {
     }
     right.push(Span::styled("? help ", dim()));
     spread(left, right, width)
+}
+
+/// The workspace's accounts (every configured account under "all"), each with its 5-hour and
+/// 7-day use. The account `n` would pick is bold when there is a choice.
+fn limits_spans(app: &App, snap: &Snapshot, now: At) -> Vec<Span<'static>> {
+    let config = &app.scope.config;
+    let (accounts, pick) = match app.workspace() {
+        Some(w) => (
+            w.accounts.clone(),
+            (w.accounts.len() > 1).then(|| roomiest(&w.accounts, &snap.limits, now)),
+        ),
+        None if config.accounts.is_empty() => (snap.limits.keys().cloned().collect(), None),
+        None => (
+            config.accounts.iter().map(|a| a.dir.clone()).collect(),
+            None,
+        ),
+    };
+    let mut out = Vec::new();
+    for (i, dir) in accounts.iter().enumerate() {
+        let name = config.account_name(dir);
+        let name_style = if pick == Some(i) {
+            Style::new().add_modifier(Modifier::BOLD)
+        } else {
+            dim()
+        };
+        out.push(Span::styled(name, name_style));
+        let Some(u) = snap.limits.get(dir) else {
+            out.push(Span::styled(" —", dim()));
+            out.push(Span::raw("  "));
+            continue;
+        };
+        let mut live = false;
+        for (label, w) in [("5h", u.five_hour), ("7d", u.seven_day)] {
+            let Some(w) = w else { continue };
+            out.push(Span::styled(format!(" {label} "), dim()));
+            out.push(limits_pct(w, now));
+            live |= w.resets_at > now;
+        }
+        if live && now.millis_since(u.at) > STALE_LIMITS_MS {
+            out.push(Span::styled(format!(" ({})", elapsed(u.at, now)), dim()));
+        }
+        out.push(Span::raw("  "));
+    }
+    out
+}
+
+const STALE_LIMITS_MS: i64 = 60 * 60 * 1000;
+
+fn limits_pct(w: Window, now: At) -> Span<'static> {
+    if w.resets_at <= now {
+        return Span::styled("↺", dim());
+    }
+    let color = match w.used_pct {
+        p if p >= 90.0 => Color::Red,
+        p if p >= 70.0 => Color::Yellow,
+        _ => Color::Green,
+    };
+    Span::styled(format!("{:.0}%", w.used_pct), Style::new().fg(color))
 }
 
 fn footer(app: &App, now: At) -> TLine<'static> {
@@ -798,7 +928,11 @@ fn footer(app: &App, now: At) -> TLine<'static> {
                 Style::new().fg(Color::Yellow),
             )),
             _ => TLine::from(Span::styled(
-                " j/k move  l expand  ⏎ open  tab detail  r label  m move  n new  / filter  q quit",
+                if app.scope.config.workspaces.is_empty() {
+                    " j/k move  l expand  ⏎ open  tab detail  r label  m move  n new  / filter  q quit"
+                } else {
+                    " j/k move  l expand  ⏎ open  tab detail  r label  m move  n new  w workspace  / filter  q quit"
+                },
                 dim(),
             )),
         },
@@ -809,10 +943,22 @@ fn footer(app: &App, now: At) -> TLine<'static> {
             input,
             "↑/↓ choose  ⏎ move  - automatic  esc cancel",
         ),
-        Mode::NewSession { input, .. } => prompt(
-            "new session name (optional): ",
+        Mode::NewSession {
+            accounts,
+            choice,
             input,
-            "⏎ launch  esc cancel",
+            ..
+        } => prompt(
+            &format!(
+                "new on {} · name (optional): ",
+                app.scope.config.account_name(&accounts[*choice])
+            ),
+            input,
+            if accounts.len() > 1 {
+                "⏎ launch  tab account  esc cancel"
+            } else {
+                "⏎ launch  esc cancel"
+            },
         ),
         Mode::Help => TLine::from(Span::styled(" any key closes help", dim())),
     }
@@ -1072,7 +1218,10 @@ fn render_help(frame: &mut Frame, body: Rect, snap: &Snapshot) {
         "⏎         jump to the pane, or attach a bg job here (^Z back)",
         "tab p     detail pane     r     label",
         "m         move to group (- automatic)",
-        "n         new bg claude here, attached (same dir, cwd, group)",
+        "n         new bg claude here, attached (cwd, group; the",
+        "          workspace account with the most room, tab picks)",
+        "w         next workspace, then all",
+        "5h 7d     account usage  ↺ reset since seen  bold: n's pick",
         "/         filter          q esc quit",
         "",
         "▲ needs you  ● working  ◐ parked  ? asked a question  ○ idle  · exited",
@@ -1232,6 +1381,8 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::config::Account;
+    use crate::model::Limits;
     use crate::model::{
         Count, Detail, DiagSource, Diagnostic, JobId, JobOutcome, Need, Node, PaneId, Parked, Pid,
         ProcStart, SessionId, TaskOutcome, WaitingFor,
@@ -1279,7 +1430,7 @@ mod tests {
     fn snap(rows: Vec<Row>) -> Snapshot {
         Snapshot {
             rows,
-            diagnostics: vec![],
+            ..Snapshot::default()
         }
     }
 
@@ -1723,6 +1874,134 @@ mod tests {
             ),
             []
         );
+    }
+
+    fn account(name: &str) -> Account {
+        Account {
+            name: name.into(),
+            dir: ConfigDir(format!("/h/.claude-{name}").into()),
+        }
+    }
+
+    /// blade (two accounts) and jnj (one), under /w.
+    fn workspaces() -> Config {
+        let (personal, wukong, jnj) = (account("personal"), account("wukong"), account("jnj"));
+        Config {
+            workspaces: vec![
+                Workspace {
+                    name: "blade".into(),
+                    root: "/w/blade".into(),
+                    accounts: vec![personal.dir.clone(), wukong.dir.clone()],
+                },
+                Workspace {
+                    name: "jnj".into(),
+                    root: "/w/jnj".into(),
+                    accounts: vec![jnj.dir.clone()],
+                },
+            ],
+            accounts: vec![personal, wukong, jnj],
+        }
+    }
+
+    fn limits(seven_day: f64, resets_at: At) -> Limits {
+        Limits {
+            five_hour: None,
+            seven_day: Some(Window {
+                used_pct: seven_day,
+                resets_at,
+            }),
+            at: At(NOW.0 - 1000),
+        }
+    }
+
+    #[test]
+    fn a_workspace_shows_only_rows_under_its_root_and_w_cycles_to_all() {
+        let s = snap(vec![
+            row("blade/api", 1, Status::Working, 0, repo("api")),
+            row("jnj/web", 2, Status::Working, 0, repo("web")),
+            row("elsewhere", 3, Status::Working, 0, repo("x")),
+        ]);
+        let user = UserState::default();
+        let mut app = App::new(false).scoped(workspaces(), Some(0), "/w/blade".into());
+        let shown = |app: &App| -> Vec<String> {
+            titles(&layout(&s, &user, app))
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        };
+        assert_eq!(shown(&app), ["blade/api"]);
+        assert!(dump(&app, &s, &user, NOW, 120).starts_with(" agentty · blade  1 live"));
+        press(&mut app, &s, &user, &[Key::Char('w')]);
+        assert_eq!(shown(&app), ["jnj/web"]);
+        press(&mut app, &s, &user, &[Key::Char('w')]);
+        assert_eq!(shown(&app).len(), 3);
+        assert!(dump(&app, &s, &user, NOW, 120).starts_with(" agentty · all  3 live"));
+        press(&mut app, &s, &user, &[Key::Char('w')]);
+        assert_eq!(shown(&app), ["blade/api"]);
+    }
+
+    #[test]
+    fn w_without_workspaces_says_where_to_add_them() {
+        let s = snap(vec![row("a", 1, Status::Working, 0, repo("a"))]);
+        let mut app = App::new(false);
+        press(&mut app, &s, &UserState::default(), &[Key::Char('w')]);
+        assert!(dump(&app, &s, &UserState::default(), NOW, 120).contains("config.toml"));
+    }
+
+    #[test]
+    fn n_in_a_workspace_starts_on_the_account_with_most_room_and_tab_switches() {
+        let config = workspaces();
+        let (personal, wukong) = (
+            config.accounts[0].dir.clone(),
+            config.accounts[1].dir.clone(),
+        );
+        let mut s = snap(vec![row("jnj/web", 1, Status::Working, 0, repo("web"))]);
+        // wukong was 97% full, but its 7-day window has reset since; personal is half used.
+        s.limits = BTreeMap::from([
+            (personal.clone(), limits(52.0, At(NOW.0 + 3_600_000))),
+            (wukong.clone(), limits(97.0, At(NOW.0 - 60_000))),
+        ]);
+        let user = UserState::default();
+        // No blade row is on screen, and agentty started outside blade: start at the root.
+        let mut app = App::new(false).scoped(config, Some(0), "/elsewhere".into());
+        let expect = |dir: &ConfigDir| Effect::NewSession {
+            dir: dir.clone(),
+            cwd: "/w/blade".into(),
+            group: None,
+            name: None,
+        };
+        press(&mut app, &s, &user, &[Key::Char('n')]);
+        assert!(dump(&app, &s, &user, NOW, 120).contains("new on wukong · name (optional)"));
+        assert_eq!(press(&mut app, &s, &user, &[Key::Enter]), [expect(&wukong)]);
+        assert_eq!(
+            press(&mut app, &s, &user, &[Key::Char('n'), Key::Tab, Key::Enter]),
+            [expect(&personal)]
+        );
+    }
+
+    #[test]
+    fn the_header_shows_each_workspace_account_and_bolds_n_s_pick() {
+        let config = workspaces();
+        let (personal, wukong) = (
+            config.accounts[0].dir.clone(),
+            config.accounts[1].dir.clone(),
+        );
+        let mut s = snap(vec![]);
+        s.limits = BTreeMap::from([
+            (personal, limits(52.0, At(NOW.0 + 3_600_000))),
+            (wukong, limits(97.0, At(NOW.0 - 60_000))),
+        ]);
+        let app = App::new(false).scoped(config, Some(0), "/w/blade".into());
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(120, 3)).unwrap();
+        term.draw(|f| render(f, &app, &s, &UserState::default(), NOW))
+            .unwrap();
+        let top = buffer_text(term.backend().buffer());
+        let top = top.lines().next().unwrap();
+        assert!(top.contains("personal 7d 52%  wukong 7d ↺"), "{top}");
+        let buf = term.backend().buffer();
+        let x = top.find("wukong").unwrap();
+        let x = u16::try_from(top[..x].chars().count()).unwrap();
+        assert!(buf[(x, 0)].modifier.contains(Modifier::BOLD));
     }
 
     #[test]

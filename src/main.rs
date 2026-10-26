@@ -1,3 +1,4 @@
+mod config;
 mod derive;
 mod jobs;
 mod model;
@@ -20,6 +21,7 @@ use notify::Watcher;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::crossterm::{execute, terminal};
 
+use config::Config;
 use model::{
     ConfigDir, DiagSource, Diagnostic, Effect, JobId, Outcome, PaneId, Problem, Row, SafeText,
     Snapshot,
@@ -37,6 +39,16 @@ struct Args {
     dump: bool,
     help: bool,
     state: Option<PathBuf>,
+    scope: ScopeArg,
+}
+
+#[derive(Debug, Default, PartialEq)]
+enum ScopeArg {
+    /// The workspace whose root holds the current directory, else all.
+    #[default]
+    Here,
+    All,
+    Named(String),
 }
 
 const TICK: Duration = Duration::from_secs(1);
@@ -47,11 +59,15 @@ const DUMP_MAX_REFRESHES: usize = 20;
 
 const DUMP_WIDTH: u16 = 160;
 
-const USAGE: &str = "usage: agentty [--popup] [--state <path>] [--dump]
+const USAGE: &str =
+    "usage: agentty [--popup] [--workspace <name> | --all] [--state <path>] [--dump]
 
-  --popup         quit after a successful jump (for tmux display-popup -E)
-  --state <path>  user state file (default ~/.config/agentty/state.toml)
-  --dump          print one frame as plain text and exit (no TTY needed)
+  --popup             quit after a successful jump (for tmux display-popup -E)
+  --workspace <name>  show this workspace from ~/.config/agentty/config.toml
+                      (default: the workspace holding the current directory)
+  --all               show every session
+  --state <path>      user state file (default ~/.config/agentty/state.toml)
+  --dump              print one frame as plain text and exit (no TTY needed)
 ";
 
 fn main() -> anyhow::Result<()> {
@@ -64,9 +80,19 @@ fn main() -> anyhow::Result<()> {
     let state_path = args
         .state
         .unwrap_or_else(|| user_state::Store::default_path(&roots.home));
+    let config_path = Config::default_path(&roots.home);
+    let config = Config::load(&config_path, &roots.home)?;
+    let cwd = std::env::current_dir()?;
+    let current = match args.scope {
+        ScopeArg::Here => config.workspace_at(&cwd),
+        ScopeArg::All => None,
+        ScopeArg::Named(name) => Some(config.workspace_named(&name).with_context(|| {
+            format!("no workspace named {name:?} in {}", config_path.display())
+        })?),
+    };
     let mut world = World::new(roots, Box::new(RealHost), ReadBudget::default());
     let mut store = user_state::Store::load(state_path)?;
-    let mut app = ui::App::new(args.popup);
+    let mut app = ui::App::new(args.popup).scoped(config, current, cwd);
 
     if args.dump {
         let mut snap = Snapshot::default();
@@ -106,6 +132,7 @@ fn snapshot(world: &World) -> Snapshot {
     derive::snapshot(
         world.sessions(),
         world.exited(now).into_iter(),
+        world.cached_limits(),
         world.diagnostics(),
         now,
     )
@@ -418,6 +445,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<Args> {
             "--popup" => out.popup = true,
             "--dump" => out.dump = true,
             "-h" | "--help" => out.help = true,
+            "--all" => out.scope = ScopeArg::All,
+            "--workspace" => {
+                out.scope = ScopeArg::Named(args.next().context("--workspace needs a name")?);
+            }
             "--state" => out.state = Some(args.next().context("--state needs a path")?.into()),
             other => match other.strip_prefix("--state=") {
                 Some(p) => out.state = Some(p.into()),
@@ -553,10 +584,17 @@ Workspace not trusted. Run `claude` in /w once and accept the trust prompt, then
                 popup: true,
                 dump: true,
                 help: false,
-                state: Some("/tmp/s.toml".into())
+                state: Some("/tmp/s.toml".into()),
+                scope: ScopeArg::Here,
             }
         );
         assert_eq!(parse(&["--state=/x"]).unwrap().state, Some("/x".into()));
+        assert_eq!(parse(&["--all"]).unwrap().scope, ScopeArg::All);
+        assert_eq!(
+            parse(&["--workspace", "blade"]).unwrap().scope,
+            ScopeArg::Named("blade".into())
+        );
+        assert!(parse(&["--workspace"]).is_err());
         assert!(parse(&["--pop"]).is_err());
         assert!(parse(&["--state"]).is_err());
     }

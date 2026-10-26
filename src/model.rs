@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -432,6 +433,49 @@ impl NodeState {
 pub struct Snapshot {
     pub rows: Vec<Row>,
     pub diagnostics: Vec<Diagnostic>,
+    pub limits: BTreeMap<ConfigDir, Limits>,
+}
+
+/// One rate-limit window as last observed. Claude Code reports `used_pct` from 0 to 100.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Window {
+    pub used_pct: f64,
+    pub resets_at: At,
+}
+
+impl Window {
+    /// What is known to be used now: a window that has reset since it was observed is empty.
+    pub fn used_now(&self, now: At) -> f64 {
+        if self.resets_at <= now {
+            0.0
+        } else {
+            self.used_pct
+        }
+    }
+}
+
+/// An account's subscription limits, from the newest observation of each window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Limits {
+    pub five_hour: Option<Window>,
+    pub seven_day: Option<Window>,
+    pub at: At,
+}
+
+impl Limits {
+    /// Takes each window from the newer observation that has it.
+    pub fn merge(self, other: Limits) -> Limits {
+        let (new, old) = if self.at >= other.at {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        Limits {
+            five_hour: new.five_hour.or(old.five_hour),
+            seven_day: new.seven_day.or(old.seven_day),
+            at: new.at,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -579,6 +623,7 @@ pub enum DiagSource {
     Subagent,
     Tasks,
     Statusline,
+    Account,
     Team,
     Ps,
     Tmux,

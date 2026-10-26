@@ -6,8 +6,8 @@ use std::process::Command;
 use crate::derive::{ExitedView, SessionView};
 use crate::jobs::{self, Job};
 use crate::model::{
-    At, ConfigDir, DiagSource, Diagnostic, JobId, PaneId, PaneInfo, Pid, Problem, ProcStart,
-    SessionId,
+    At, ConfigDir, DiagSource, Diagnostic, JobId, Limits, PaneId, PaneInfo, Pid, Problem,
+    ProcStart, SessionId,
 };
 use crate::registry::{self, RegEntry};
 use crate::sidecars::{self, Statusline, Task, Team};
@@ -129,6 +129,7 @@ pub struct World {
     resolved: HashMap<(ConfigDir, SessionId), Resolution>,
     tasks: HashMap<(ConfigDir, SessionId), (Vec<FileStamp>, Vec<Task>)>,
     statusline: HashMap<SessionId, Statusline>,
+    limits_cache: HashMap<ConfigDir, (FileStamp, Option<Limits>)>,
     teams: BTreeMap<PathBuf, (FileStamp, Team)>,
     repos: HashMap<PathBuf, Option<PathBuf>>,
     proc_starts: HashMap<Pid, ProcStart>,
@@ -167,6 +168,7 @@ impl World {
             resolved: HashMap::new(),
             tasks: HashMap::new(),
             statusline: HashMap::new(),
+            limits_cache: HashMap::new(),
             teams: BTreeMap::new(),
             repos: HashMap::new(),
             proc_starts: HashMap::new(),
@@ -195,6 +197,7 @@ impl World {
         self.resolve_transcripts(now);
         if tick {
             self.pump_transcripts(now);
+            self.refresh_limits_cache();
             match self.host.panes() {
                 Ok(panes) => self.panes = panes,
                 Err(HostError) => {
@@ -517,6 +520,38 @@ impl World {
         self.statusline = next;
     }
 
+    fn refresh_limits_cache(&mut self) {
+        let mut next = HashMap::new();
+        for dir in &self.dirs {
+            let path = sidecars::account_file(&self.roots.home, dir);
+            let Ok(stamp) = FileStamp::of(&path) else {
+                continue;
+            };
+            let entry = match self.limits_cache.remove(dir) {
+                Some(kept) if kept.0 == stamp => kept,
+                _ => {
+                    let parsed = std::fs::read(&path)
+                        .map_err(|_| Problem::Unreadable)
+                        .and_then(|b| sidecars::parse_limits_cache(&b));
+                    match parsed {
+                        Ok(usage) => (stamp, usage),
+                        Err(p) => {
+                            self.diagnostics.push(diag(
+                                &self.roots.home,
+                                DiagSource::Account,
+                                p,
+                                &path,
+                            ));
+                            continue;
+                        }
+                    }
+                }
+            };
+            next.insert(dir.clone(), entry);
+        }
+        self.limits_cache = next;
+    }
+
     fn refresh_teams(&mut self) {
         let mut next = BTreeMap::new();
         for dir in &self.dirs {
@@ -636,6 +671,13 @@ impl World {
             .chain([sidecars::statusline_dir(&self.roots.cache)])
             .filter(|p| p.is_dir())
             .collect()
+    }
+
+    /// Each account's usage as `/usage` last cached it.
+    pub fn cached_limits(&self) -> impl Iterator<Item = (&ConfigDir, Limits)> {
+        self.limits_cache
+            .iter()
+            .filter_map(|(dir, (_, usage))| Some((dir, (*usage)?)))
     }
 
     pub fn diagnostics(&self) -> &[Diagnostic] {

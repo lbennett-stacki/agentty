@@ -10,7 +10,7 @@ Show every live Claude Code session in one grouped list with a status that tells
 - Transcripts are append-only, 1 to 17 MB each, and are the only source that separates Working from Parked.
 - Subagent sidecars are flat. Their tree comes from `meta.parentAgentId`, and depth-2 completions land in the parent agent's file.
 - bg `state.json` holds live credentials in `providerEnv`. Shell labels and Bash commands can hold inline secrets.
-- Two config dirs exist, and nothing on disk says which one a cwd belongs to.
+- Several config dirs (accounts) exist, and nothing on disk says which one a cwd belongs to. The user says so in `config.toml`: each workspace is a root directory plus the accounts used under it.
 - SPEC binds us to tail reads (never full scans), no pricing or window tables, no writes to Claude files, no hooks, and no PTY.
 
 ## What the user sees
@@ -63,6 +63,7 @@ Eleven flat files. Input reaches pixels in at most three hops.
 | `world` | every cursor and cache; stat-gated refresh; `Host`; GC | `SessionView`s, `ExitedView`s, `Diagnostic`s |
 | `derive` | every product decision: status table, parked counts, title, now-line, tree, auto-group, Enter target | `Snapshot` |
 | `user_state` | `~/.config/agentty/state.toml`, `rebind` | `UserState`, `Store`, `Op`s |
+| `config` | `~/.config/agentty/config.toml` (user-written, read once at start) | `Config`, `Account`, `Workspace` |
 | `ui` | view state, pure `layout -> Vec<Line>`, pure key reducer, renderer | `Vec<Effect>`, frames |
 | `main` | the loop, feeder threads, `execute(Effect)`, `TmuxCmd::argv` | nothing |
 
@@ -127,6 +128,12 @@ Every parse failure is a typed `Diagnostic { source, problem, path }`, where `Pr
 - **A read budget bounds the frame.** `ReadBudget { bytes_per_refresh }` (default 4 MB) caps what first-sight windows may read in one refresh. A file that does not fit gets a `Deferred` diagnostic and opens on a later refresh. This keeps IO on the UI thread tolerable on a cold start with 20 large files. If measurement shows frame stalls anyway, moving `World` behind a channel is mechanical because the design shares nothing.
 - **Subagents.** The dir is re-listed only when its mtime moves. A sidecar cursor (64 KB tail) exists only for agents in a provisional state (`NodeState::is_provisional`: `Running` or `Finished(AwaitingNotice)`), and is pumped each tick so an agent that resumes flips back to `Running` when its file grows. A terminal state (a notified outcome, `Killed`, `Orphaned`) drops the cursor. A session with 100 notified historical agents costs one `stat` per refresh; each agent still awaiting its notice costs one more.
 - **Cost at 20 sessions.** A steady tick is about 20 transcript stats, a few sidecar stats, ~20 small registry reads, ~30 `state.json` and task-dir stats, one `ps` and one `tmux list-panes`. Derive is microseconds, so there is no incremental derive and no derived cache to invalidate.
+
+### Workspaces and account limits
+
+A workspace is a scope in `ui::App`, not a filter in `World`: `World` and `derive` still see every session, and `ui::layout` and the header keep the rows whose cwd is under the workspace root. `w` switching scope is therefore instant and needs no refresh.
+
+`Snapshot.limits` maps each config dir to its `Limits { five_hour, seven_day, at }`. Two sources feed it. The statusline tee's `rate_limits` is fresh whenever a session of that account renders. `cachedUsageUtilization` in the account's `.claude.json` is whatever `/usage` last fetched, often days old, and `World` re-parses it only when the file's stamp moves (on the tick). `derive::snapshot` starts from the cache and merges every live session's tee, hidden spares included, with `Limits::merge` taking each window from the newer observation. A window whose `resets_at` has passed is empty (`Window::used_now`), so a stale 97% that has since reset counts as room. `derive::roomiest` orders a workspace's accounts for `n`: nothing full first (else the earliest to free up), then 7-day use, then 5-hour use, ties in configured order.
 
 ### Persistence
 

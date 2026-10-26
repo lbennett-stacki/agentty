@@ -34,7 +34,7 @@ cargo install --path .
 Then add two key bindings to your tmux config:
 
 ```tmux
-bind a display-popup -E -w 90% -h 85% -T ' agents ' 'agentty --popup'
+bind a display-popup -E -d '#{pane_current_path}' -w 90% -h 85% -T ' agents ' 'agentty --popup'
 bind A run-shell 'tmux select-window -t "=agents" 2>/dev/null || tmux new-window -n agents agentty'
 ```
 
@@ -67,10 +67,36 @@ Rows group by your own groups first, then by team, then by git repository (workt
 | tab, `p` | show the detail pane (last prompt, last reply, open tasks, pending work, ids) |
 | `r` | set a label (an empty label clears it) |
 | `m` | move to a group. Type a new name to create a group, or `-` to return the row to its automatic group. |
-| `n` | start a new background `claude` (`claude --bg`) in the selected row's directory, config dir, and group, and attach to it here. Ctrl+Z comes back. |
+| `n` | start a new background `claude` (`claude --bg`) in the selected row's directory and group, and attach to it here. Ctrl+Z comes back. In a workspace it starts on the workspace account with the most usage left, and tab picks another. |
+| `w` | show the next workspace, then all sessions |
 | `/` | filter |
 | `?` | help and diagnostics |
 | `q`, Esc | quit |
+
+## Workspaces and accounts
+
+If you use several Claude accounts, each with its own config dir, a workspace limits agentty to one directory tree and its accounts. Define them in `~/.config/agentty/config.toml`:
+
+```toml
+[accounts]
+jnj = "~/.claude"
+personal = "~/.claude-personal"
+wukong = "~/.claude-wukong"
+
+[workspaces.jnj]
+root = "~/workspace/jnj"
+accounts = ["jnj"]
+
+[workspaces.blade]
+root = "~/workspace/blade"
+accounts = ["personal", "wukong"]
+```
+
+agentty opens on the workspace whose `root` holds the directory you start it in, and shows only sessions whose working directory is under that root. `--workspace <name>` picks one, `--all` shows everything, and `w` switches while it runs. Without this file, agentty shows every session.
+
+The header shows each workspace account's 5-hour and 7-day usage, such as `personal 5h 12% 7d 52%  wukong 7d ↺`. `↺` means the window has reset since agentty last saw it. A dim age such as `(1d)` means the numbers are that old. `n` starts new sessions on the account with the most room: one with no full window, then the least 7-day use, then the least 5-hour use. That account's name is bold.
+
+Usage comes from two places. Claude Code passes it to your statusline script, so the statusline tee below keeps it current while any session of that account is on screen. Claude Code also caches it in the account's `.claude.json` whenever you open `/usage`. agentty uses whichever is newer.
 
 ## Context and cost
 
@@ -92,10 +118,11 @@ agentty scans `~/.claude` and every `~/.claude-*` directory that has a `sessions
 - `projects/*/<session>.jsonl` and `subagents/`, to get titles, the current tool call, background work, branch, pull requests, and context tokens. It reads only the last 256 KB to 4 MB of each transcript, then only the bytes appended after that.
 - `jobs/<id>/state.json` for bg jobs. agentty does not read the `providerEnv` field, which holds credentials.
 - `tasks/<session>/`, `teams/*/config.json`, and the optional statusline cache.
+- The usage cache (`cachedUsageUtilization`) in each account's `.claude.json` (`~/.claude.json` for `~/.claude`). It reads no other field of that file.
 
 It shows Bash background work by its description, never by its command line. It removes token-shaped strings from every label before display.
 
-agentty writes only `~/.config/agentty/state.toml`, which holds your labels and groups.
+agentty writes only `~/.config/agentty/state.toml`, which holds your labels and groups. It reads `~/.config/agentty/config.toml` but never writes it.
 
 ## Check what it sees
 

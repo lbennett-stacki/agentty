@@ -1,11 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use crate::jobs::{FanItem, FanKind, Job, JobState, Tempo};
 use crate::model::{
     AgentId, At, AutoGroup, ConfigDir, Cost, Count, Ctx, Detail, DiagSource, Diagnostic,
-    JobOutcome, Meta, Need, Node, NodeKind, NodeState, OpenTarget, PaneInfo, Parked, Problem, Row,
-    RowKey, SafeText, Snapshot, Status, TaskId, TaskOutcome, Tree, UserKey, WaitingFor,
+    JobOutcome, Limits, Meta, Need, Node, NodeKind, NodeState, OpenTarget, PaneInfo, Parked,
+    Problem, Row, RowKey, SafeText, Snapshot, Status, TaskId, TaskOutcome, Tree, UserKey,
+    WaitingFor, Window,
 };
 use crate::registry::{Name, NameSource, ProcKind, RegEntry, RegStatus};
 use crate::sidecars::{Statusline, Task, TaskStatus, Team};
@@ -40,14 +41,25 @@ const DETAIL_FRESH_MS: i64 = 2 * 60 * 1000;
 pub fn snapshot<'a>(
     sessions: impl Iterator<Item = SessionView<'a>>,
     exited: impl Iterator<Item = ExitedView<'a>>,
+    cached_limits: impl Iterator<Item = (&'a ConfigDir, Limits)>,
     world_diagnostics: &[Diagnostic],
     now: At,
 ) -> Snapshot {
     let mut snap = Snapshot {
         rows: Vec::new(),
         diagnostics: world_diagnostics.to_vec(),
+        limits: cached_limits.map(|(d, u)| (d.clone(), u)).collect(),
     };
-    for v in sessions.filter(|v| !v.reg.hidden) {
+    for v in sessions {
+        if let Some(seen) = v.statusline.and_then(|s| s.limits) {
+            snap.limits
+                .entry(v.dir.clone())
+                .and_modify(|u| *u = u.merge(seen))
+                .or_insert(seen);
+        }
+        if v.reg.hidden {
+            continue;
+        }
         unknown_values(v.dir, Some(v.reg), v.job, &mut snap.diagnostics);
         snap.rows.push(live_row(v, now));
     }
@@ -56,6 +68,42 @@ pub fn snapshot<'a>(
         snap.rows.push(exited_row(v));
     }
     snap
+}
+
+/// The account `n` should start on: one with no full window, then the most 7-day room, then the
+/// most 5-hour room. When every account is full, the one that frees up first. An account with no
+/// observation counts as empty. Ties keep the configured order.
+pub fn roomiest(accounts: &[ConfigDir], limits: &BTreeMap<ConfigDir, Limits>, now: At) -> usize {
+    let key = |dir: &ConfigDir| {
+        let u = limits.get(dir);
+        let windows = || {
+            u.into_iter()
+                .flat_map(|u| [u.five_hour, u.seven_day])
+                .flatten()
+        };
+        let free_at = windows()
+            .filter(|w| w.used_now(now) >= 100.0)
+            .map(|w| w.resets_at)
+            .max();
+        let used = |w: Option<Window>| w.map_or(0.0, |w| w.used_now(now));
+        (
+            free_at,
+            used(u.and_then(|u| u.seven_day)),
+            used(u.and_then(|u| u.five_hour)),
+        )
+    };
+    let keys: Vec<_> = accounts.iter().map(key).collect();
+    (0..keys.len())
+        .min_by(|&a, &b| {
+            let (fa, sa, ha) = keys[a];
+            let (fb, sb, hb) = keys[b];
+            // `None` (nothing full) must sort before any reset time.
+            (fa.is_some(), fa)
+                .cmp(&(fb.is_some(), fb))
+                .then(sa.total_cmp(&sb))
+                .then(ha.total_cmp(&hb))
+        })
+        .unwrap_or(0)
 }
 
 fn unknown_values(
@@ -1266,7 +1314,13 @@ mod tests {
                 asked_question: false
             }
         );
-        let snap = snapshot([fx.view()].into_iter(), std::iter::empty(), &[], T0);
+        let snap = snapshot(
+            [fx.view()].into_iter(),
+            std::iter::empty(),
+            std::iter::empty(),
+            &[],
+            T0,
+        );
         assert_eq!(snap.rows.len(), 1);
         assert_eq!(
             snap.diagnostics
@@ -1645,6 +1699,7 @@ mod tests {
             ctx_used_pct: Some(41.2),
             window,
             cost_usd: Some(3.41),
+            limits: None,
             at: t,
         }
     }
@@ -1670,6 +1725,100 @@ mod tests {
         let nothing = Fx::new(reg(RegStatus::Busy));
         let m = meta(&nothing.view());
         assert_eq!((m.ctx, m.cost), (None, None));
+    }
+
+    fn win(used_pct: f64, resets_at: At) -> Window {
+        Window {
+            used_pct,
+            resets_at,
+        }
+    }
+
+    fn seen(five_hour: Option<Window>, seven_day: Option<Window>, at: At) -> Limits {
+        Limits {
+            five_hour,
+            seven_day,
+            at,
+        }
+    }
+
+    #[test]
+    fn account_usage_takes_each_window_from_its_newest_observation() {
+        let mut fx = Fx::new(reg(RegStatus::Idle));
+        // A hidden spare still reports its account's limits.
+        fx.reg.hidden = true;
+        fx.statusline = Some(Statusline {
+            limits: Some(seen(Some(win(10.0, at(3600))), None, at(-1))),
+            ..statusline(at(-1), None)
+        });
+        let cached = seen(
+            Some(win(90.0, at(-60))),
+            Some(win(40.0, at(86_400))),
+            at(-86_400),
+        );
+        let snap = snapshot(
+            [fx.view()].into_iter(),
+            std::iter::empty(),
+            [(&fx.dir, cached)].into_iter(),
+            &[],
+            T0,
+        );
+        assert!(snap.rows.is_empty());
+        assert_eq!(
+            snap.limits[&fx.dir],
+            seen(
+                Some(win(10.0, at(3600))),
+                Some(win(40.0, at(86_400))),
+                at(-1)
+            )
+        );
+    }
+
+    #[test]
+    fn roomiest_skips_full_accounts_then_prefers_7d_then_5h_room() {
+        let (a, b) = (
+            ConfigDir("/h/.claude-a".into()),
+            ConfigDir("/h/.claude-b".into()),
+        );
+        let pick = |ua: Limits, ub: Limits| {
+            let usage = BTreeMap::from([(a.clone(), ua), (b.clone(), ub)]);
+            roomiest(&[a.clone(), b.clone()], &usage, T0)
+        };
+        let later = at(3600);
+        // a's 5-hour window is full: b wins despite more 7-day use.
+        assert_eq!(
+            pick(
+                seen(Some(win(100.0, later)), Some(win(10.0, later)), T0),
+                seen(Some(win(5.0, later)), Some(win(80.0, later)), T0)
+            ),
+            1
+        );
+        // a's full 7-day window reset since it was seen, so a is empty and wins.
+        assert_eq!(
+            pick(
+                seen(None, Some(win(97.0, at(-60))), T0),
+                seen(None, Some(win(52.0, later)), T0)
+            ),
+            0
+        );
+        // Equal 7-day use: the 5-hour window decides.
+        assert_eq!(
+            pick(
+                seen(Some(win(60.0, later)), Some(win(30.0, later)), T0),
+                seen(Some(win(20.0, later)), Some(win(30.0, later)), T0)
+            ),
+            1
+        );
+        // Both full: the one that frees up first.
+        assert_eq!(
+            pick(
+                seen(None, Some(win(100.0, at(7200))), T0),
+                seen(Some(win(100.0, at(600))), None, T0)
+            ),
+            1
+        );
+        // Never observed counts as empty, and ties keep the configured order.
+        assert_eq!(roomiest(&[a.clone(), b.clone()], &BTreeMap::new(), T0), 0);
     }
 
     #[test]
@@ -2042,6 +2191,7 @@ mod tests {
                 facts: None,
             }]
             .into_iter(),
+            std::iter::empty(),
             &[],
             T0,
         );

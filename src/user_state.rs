@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +14,8 @@ const VERSION: u32 = 1;
 pub struct UserState {
     pub groups: Vec<GroupName>,
     pub entries: BTreeMap<UserKey, Entry>,
+    /// Skills the user keeps on the accounts that have them; the skills view sorts them last.
+    pub local_skills: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -46,6 +48,13 @@ impl UserState {
                 }
                 if let Some(e) = self.entries.get_mut(&UserKey::Session(session.clone())) {
                     e.anchor = Some(anchor.clone());
+                }
+            }
+            Op::SetSkillLocal { name, local } => {
+                if *local {
+                    self.local_skills.insert(name.clone());
+                } else {
+                    self.local_skills.remove(name);
                 }
             }
             Op::Rekey { from, to } => {
@@ -123,6 +132,8 @@ struct WireState {
     groups: Vec<String>,
     #[serde(default)]
     entries: BTreeMap<String, WireEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    local_skills: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -260,6 +271,7 @@ fn decode(text: &str) -> Result<UserState, Decode> {
     Ok(UserState {
         groups: wire.groups.into_iter().map(GroupName).collect(),
         entries,
+        local_skills: wire.local_skills.into_iter().collect(),
     })
 }
 
@@ -283,6 +295,7 @@ fn encode(state: &UserState) -> String {
                 (k.encode(), entry)
             })
             .collect(),
+        local_skills: state.local_skills.iter().cloned().collect(),
     };
     toml::to_string(&wire).expect("WireState holds only strings, ints and tables")
 }
@@ -353,6 +366,10 @@ mod tests {
             Op::Rekey {
                 from: sid("a"),
                 to: sid("b"),
+            },
+            Op::SetSkillLocal {
+                name: "verify".into(),
+                local: true,
             },
         ];
         for op in &ops {
@@ -495,6 +512,10 @@ mod tests {
             anchor: anchor(41213),
         });
         s.apply(&label(UserKey::Job(JobId("0a1b2c3d".into())), "fees"));
+        s.apply(&Op::SetSkillLocal {
+            name: "verify".into(),
+            local: true,
+        });
         let text = encode(&s);
         assert!(text.contains("version = 1"), "{text}");
         assert!(!text.contains("\"\""), "{text}");

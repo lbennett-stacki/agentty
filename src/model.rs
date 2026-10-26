@@ -2,6 +2,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::skills::Inventory;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct At(pub i64);
 
@@ -658,6 +660,11 @@ pub enum Op {
         from: SessionId,
         to: SessionId,
     },
+    /// Mark a skill as meant for the accounts that have it, so the skills view stops asking.
+    SetSkillLocal {
+        name: String,
+        local: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -672,7 +679,9 @@ pub enum Effect {
         cwd: PathBuf,
         group: Option<GroupName>,
         name: Option<String>,
+        prompt: Option<String>,
     },
+    ScanSkills(Vec<ConfigDir>),
     Commit(Op),
     Quit,
 }
@@ -687,6 +696,7 @@ pub enum Outcome {
         group: Option<GroupName>,
     },
     Committed,
+    Skills(Inventory),
     Failed(String),
 }
 

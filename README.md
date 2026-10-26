@@ -69,6 +69,7 @@ Rows group by your own groups first, then by team, then by git repository (workt
 | `m` | move to a group. Type a new name to create a group, or `-` to return the row to its automatic group. |
 | `n` | start a new background `claude` (`claude --bg`) in the selected row's directory and group, and attach to it here. Ctrl+Z comes back. In a workspace it starts on the workspace account with the most usage left, and tab picks another. |
 | `w` | show the next workspace, then all sessions |
+| `s` | show the skills view: which skills each account has, and which are missing or copied (see [Skills across accounts](#skills-across-accounts)). `s` or Esc goes back. |
 | `/` | filter |
 | `?` | help and diagnostics |
 | `q`, Esc | quit |
@@ -102,6 +103,25 @@ Usage comes from three places, and agentty uses the newest for each window:
 - Claude Code caches it in the account's `.claude.json` whenever you open `/usage`.
 - When an account runs out, the API refuses the next request and the session's transcript records which window is full and when it resets. agentty reads the last week of transcripts for these refusals, so a full account shows 100% even when none of its sessions is open. It credits each refusal to the account whose `history.jsonl` sent that session's last prompt before it, because config dirs can share `projects/` and a session can be resumed on another account.
 
+## Skills across accounts
+
+`s` shows every skill in each account's `skills/` folder, one row per skill and one column per account. Each cell is `●` (the account's own copy), `→` (a symlink to a copy elsewhere), `·` (missing) or `✗` (a broken symlink). Two accounts whose whole `skills/` folder is one folder are named on the last line. Rows that need something come first: a skill missing on some account, held as two separate copies, or linked to nothing. Then come shared skills, then the ones you keep local. Claude.ai's `synced/` folder is skipped.
+
+| key | action |
+|---|---|
+| Enter | start a `share-skill` agent for the skill, as a bg `claude` on the roomiest account, and attach to it. The agent first checks the skill is free of one org's repos, keys and tools, fixing or gating what isn't, and then moves it into the shared folder and symlinks it into each account. tab picks the account. When you come back, agentty rescans. |
+| `x` | keep the skill local, or share it again. Kept skills sort last and Enter leaves them alone. |
+| `r` | rescan the folders |
+
+agentty itself only lists and resolves these folders. The agent does the moving and linking, so you can watch it and answer its questions. Enter needs the shared folder in `config.toml`:
+
+```toml
+[skills]
+shared = "~/.claude-personal/skills"
+```
+
+The agent follows the `share-skill` skill, which must be installed on the account it runs on. `agentty --dump --skills` prints the view as text.
+
 ## Context and cost
 
 Context shows as a token count, such as `277k`, because the transcript does not record the model's context window. Cost is shown only for exited sessions, from Claude Code's own exit record. agentty has no price table, so it never estimates cost.
@@ -122,12 +142,13 @@ agentty scans `~/.claude` and every `~/.claude-*` directory that has a `sessions
 - `projects/*/<session>.jsonl` and `subagents/`, to get titles, the current tool call, background work, branch, pull requests, and context tokens. It reads only the last 256 KB to 4 MB of each transcript, then only the bytes appended after that.
 - `jobs/<id>/state.json` for bg jobs. agentty does not read the `providerEnv` field, which holds credentials.
 - `tasks/<session>/`, `teams/*/config.json`, and the optional statusline cache.
+- `skills/*`, only for the skills view: each entry's name, where its symlinks lead, and whether its `SKILL.md` matches the other copies.
 - The usage cache (`cachedUsageUtilization`) in each account's `.claude.json` (`~/.claude.json` for `~/.claude`). It reads no other field of that file.
 - Rate-limit refusals (`quotaLimits`) in transcripts written in the last week, and each account's `history.jsonl` session ids and times, to tell which account was refused. From `history.jsonl` it keeps only those two fields, never the prompt text.
 
 It shows Bash background work by its description, never by its command line. It removes token-shaped strings from every label before display.
 
-agentty writes only `~/.config/agentty/state.toml`, which holds your labels and groups. It reads `~/.config/agentty/config.toml` but never writes it.
+agentty writes only `~/.config/agentty/state.toml`, which holds your labels, groups and the skills you keep local. It reads `~/.config/agentty/config.toml` but never writes it.
 
 ## Check what it sees
 

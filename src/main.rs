@@ -5,6 +5,7 @@ mod limits;
 mod model;
 mod registry;
 mod sidecars;
+mod skills;
 mod subagents;
 mod transcript;
 mod ui;
@@ -38,6 +39,7 @@ enum Msg {
 struct Args {
     popup: bool,
     dump: bool,
+    skills: bool,
     help: bool,
     state: Option<PathBuf>,
     scope: ScopeArg,
@@ -61,7 +63,7 @@ const DUMP_MAX_REFRESHES: usize = 20;
 const DUMP_WIDTH: u16 = 160;
 
 const USAGE: &str =
-    "usage: agentty [--popup] [--workspace <name> | --all] [--state <path>] [--dump]
+    "usage: agentty [--popup] [--workspace <name> | --all] [--state <path>] [--dump] [--skills]
 
   --popup             quit after a successful jump (for tmux display-popup -E)
   --workspace <name>  show this workspace from ~/.config/agentty/config.toml
@@ -69,6 +71,7 @@ const USAGE: &str =
   --all               show every session
   --state <path>      user state file (default ~/.config/agentty/state.toml)
   --dump              print one frame as plain text and exit (no TTY needed)
+  --skills            with --dump, print the skills view instead
 ";
 
 fn main() -> anyhow::Result<()> {
@@ -93,7 +96,11 @@ fn main() -> anyhow::Result<()> {
     };
     let mut world = World::new(roots, Box::new(RealHost), ReadBudget::default());
     let mut store = user_state::Store::load(state_path)?;
+    let accounts: Vec<ConfigDir> = config.accounts.iter().map(|a| a.dir.clone()).collect();
     let mut app = ui::App::new(args.popup).scoped(config, current, cwd);
+    if args.skills {
+        app = app.with_skills(skills::scan(&accounts));
+    }
 
     if args.dump {
         let mut snap = Snapshot::default();
@@ -287,10 +294,11 @@ impl TmuxCmd {
 
 /// `claude --bg` picks its own session id (it ignores `--session-id`), so the job id it prints
 /// is the only handle on the new session.
-fn claude_bg(dir: &ConfigDir, cwd: &Path, name: Option<&str>) -> Command {
+fn claude_bg(dir: &ConfigDir, cwd: &Path, name: Option<&str>, prompt: Option<&str>) -> Command {
     let mut cmd = Command::new("claude");
     cmd.arg("--bg")
         .args(name.map(|n| ["--name", n]).into_iter().flatten())
+        .args(prompt.map(|p| ["--", p]).into_iter().flatten())
         .current_dir(cwd)
         .env("CLAUDE_CONFIG_DIR", &dir.0)
         .stdin(Stdio::null());
@@ -404,13 +412,15 @@ fn execute(effect: Effect, store: &mut user_state::Store, screen: &mut Screen) -
             cwd,
             group,
             name,
-        } => match claude_bg(&dir, &cwd, name.as_deref()).output() {
+            prompt,
+        } => match claude_bg(&dir, &cwd, name.as_deref(), prompt.as_deref()).output() {
             Err(e) => Outcome::Failed(format!("could not run claude --bg: {e}")),
             Ok(out) => match job_from_bg_output(&String::from_utf8_lossy(&out.stdout)) {
                 Some(job) => Outcome::Spawned { dir, job, group },
                 None => Outcome::Failed(bg_failure(&String::from_utf8_lossy(&out.stderr))),
             },
         },
+        Effect::ScanSkills(accounts) => Outcome::Skills(skills::scan(&accounts)),
         Effect::Attach { dir, job } => match screen.hand_over(&mut claude_attach(&dir, &job)) {
             Ok(status) if status.success() => Outcome::Attached,
             Ok(status) => Outcome::Failed(format!("claude attach failed ({status})")),
@@ -445,6 +455,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<Args> {
         match arg.as_str() {
             "--popup" => out.popup = true,
             "--dump" => out.dump = true,
+            "--skills" => out.skills = true,
             "-h" | "--help" => out.help = true,
             "--all" => out.scope = ScopeArg::All,
             "--workspace" => {
@@ -533,7 +544,7 @@ mod tests {
 
     #[test]
     fn new_session_runs_claude_bg_in_the_row_cwd_with_an_optional_name() {
-        let cmd = claude_bg(&dir(), Path::new("/w/my repo"), Some("fix the bug"));
+        let cmd = claude_bg(&dir(), Path::new("/w/my repo"), Some("fix the bug"), None);
         assert_eq!(cmd.get_program(), "claude");
         assert_eq!(
             cmd.get_args().collect::<Vec<_>>(),
@@ -547,8 +558,22 @@ mod tests {
                 Some("/Users/u/.claude-personal".as_ref())
             )]
         );
-        let unnamed = claude_bg(&dir(), Path::new("/w"), None);
+        let unnamed = claude_bg(&dir(), Path::new("/w"), None, None);
         assert_eq!(unnamed.get_args().collect::<Vec<_>>(), ["--bg"]);
+    }
+
+    #[test]
+    fn a_prompt_goes_last_after_a_double_dash() {
+        let cmd = claude_bg(
+            &dir(),
+            Path::new("/w"),
+            Some("share jot"),
+            Some("/share-skill jot"),
+        );
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            ["--bg", "--name", "share jot", "--", "/share-skill jot"]
+        );
     }
 
     #[test]
@@ -584,6 +609,7 @@ Workspace not trusted. Run `claude` in /w once and accept the trust prompt, then
             Args {
                 popup: true,
                 dump: true,
+                skills: false,
                 help: false,
                 state: Some("/tmp/s.toml".into()),
                 scope: ScopeArg::Here,

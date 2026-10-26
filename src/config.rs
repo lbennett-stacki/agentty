@@ -12,6 +12,8 @@ use crate::model::ConfigDir;
 pub struct Config {
     pub accounts: Vec<Account>,
     pub workspaces: Vec<Workspace>,
+    /// `[skills] shared`: the folder that skills shared across accounts live in.
+    pub shared_skills: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +38,13 @@ struct WireConfig {
     accounts: BTreeMap<String, String>,
     #[serde(default)]
     workspaces: BTreeMap<String, WireWorkspace>,
+    skills: Option<WireSkills>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSkills {
+    shared: String,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +122,7 @@ fn parse(text: &str, home: &Path) -> anyhow::Result<Config> {
     Ok(Config {
         accounts,
         workspaces,
+        shared_skills: wire.skills.map(|s| expand(home, &s.shared)),
     })
 }
 
@@ -149,6 +159,9 @@ mod tests {
             [workspaces.web]
             root = "~/workspace/jnj/web"
             accounts = ["jnj"]
+
+            [skills]
+            shared = "~/.claude-personal/skills"
             "#,
             Path::new(HOME),
         )
@@ -172,6 +185,10 @@ mod tests {
             ]
         );
         assert_eq!(c.account_name(&dir("/Users/u/.claude")), "jnj");
+        assert_eq!(
+            c.shared_skills.as_deref(),
+            Some(Path::new("/Users/u/.claude-personal/skills"))
+        );
         assert_eq!(c.account_name(&dir("/Users/u/.claude-other")), "other");
         assert_eq!(
             Config::default().account_name(&dir("/Users/u/.claude")),
@@ -203,6 +220,7 @@ mod tests {
         );
         assert!(err("[workspaces.x]\nroot = \"~/x\"\naccounts = []").contains("lists no accounts"));
         assert!(parse("[workspace.x]\nroot = \"~/x\"", home).is_err());
+        assert!(parse("[skills]\nshare = \"~/x\"", home).is_err());
         assert_eq!(parse("", home).unwrap(), Config::default());
     }
 

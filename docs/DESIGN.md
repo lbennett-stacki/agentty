@@ -50,7 +50,7 @@ Popup flow (`bind a display-popup -E -w 90% -h 85% -T ' agents ' 'agentty --popu
 
 ### Module map
 
-Eleven flat files. Input reaches pixels in at most three hops.
+Twelve flat files plus the skills view, a child of `ui`. Input reaches pixels in at most three hops.
 
 | module | owns | yields |
 |---|---|---|
@@ -64,7 +64,9 @@ Eleven flat files. Input reaches pixels in at most three hops.
 | `derive` | every product decision: status table, parked counts, title, now-line, tree, auto-group, Enter target | `Snapshot` |
 | `user_state` | `~/.config/agentty/state.toml`, `rebind` | `UserState`, `Store`, `Op`s |
 | `config` | `~/.config/agentty/config.toml` (user-written, read once at start) | `Config`, `Account`, `Workspace` |
+| `skills` | each account's `skills/` folder, resolved and compared; the `share-skill` prompt | `Inventory`, `Skill`, `Cell`, `Spread` |
 | `ui` | view state, pure `layout -> Vec<Line>`, pure key reducer, renderer | `Vec<Effect>`, frames |
+| `ui/skills_view` | the skills grid, its order and keys | `Vec<Effect>`, frames |
 | `main` | the loop, feeder threads, `execute(Effect)`, `TmuxCmd::argv` | nothing |
 
 Data flow: files → parser module (private `Wire*` struct → domain type) → `World` caches → `SessionView` (borrowed refs, defined in `derive`) → `derive::snapshot` (pure) → `Snapshot` → `ui::layout` (pure, applies user state) → `Vec<Line>` → `ui::render`. Keys → `ui::key_of` → `ui::update` (pure) → `Effect` → `main::execute` → `Outcome` → `ui::update`.

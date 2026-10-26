@@ -17,7 +17,11 @@ use crate::model::{
     OpenTarget, Outcome, Problem, Rank, Row, RowKey, SafeText, Snapshot, Status, TaskId, Tree,
     UserKey, Window, row_order,
 };
+use crate::skills::Inventory;
 use crate::user_state::UserState;
+
+mod skills_view;
+use skills_view::SkillsView;
 
 const FLASH_MS: i64 = 4000;
 const INDENT: &str = "     ";
@@ -33,6 +37,8 @@ pub struct App {
     mode: Mode,
     flash: Option<Flash>,
     scope: Scope,
+    /// The skills view, on screen in place of the session list while `Some`.
+    skills: Option<SkillsView>,
 }
 
 #[derive(Debug, Default)]
@@ -80,6 +86,8 @@ pub enum Mode {
         cwd: PathBuf,
         group: Option<GroupName>,
         input: String,
+        /// The first prompt, for an agent started from the skills view.
+        prompt: Option<String>,
     },
     Help,
 }
@@ -145,7 +153,13 @@ impl App {
             mode: Mode::Normal,
             flash: None,
             scope: Scope::default(),
+            skills: None,
         }
+    }
+
+    pub fn with_skills(mut self, inv: Inventory) -> App {
+        self.skills = Some(SkillsView::new(inv));
+        self
     }
 
     pub fn scoped(mut self, config: Config, current: Option<usize>, cwd: PathBuf) -> App {
@@ -210,6 +224,7 @@ pub fn update(
         app.place(&lines, i);
     }
     match std::mem::replace(&mut app.mode, Mode::Normal) {
+        Mode::Normal if app.skills.is_some() => skills_view::keys(app, snap, user, key, now),
         Mode::Normal => normal(app, snap, user, &lines, key, now),
         Mode::Filter { mut input } => {
             match key {
@@ -288,12 +303,14 @@ pub fn update(
             cwd,
             group,
             mut input,
+            prompt,
         } => match key {
             Key::Enter => vec![Effect::NewSession {
                 dir: accounts[choice].clone(),
                 cwd,
                 group,
                 name: non_empty(&input),
+                prompt,
             }],
             Key::Esc => vec![],
             _ => {
@@ -308,6 +325,7 @@ pub fn update(
                     cwd,
                     group,
                     input,
+                    prompt,
                 };
                 vec![]
             }
@@ -405,7 +423,25 @@ fn normal(
                 cwd,
                 group: row.and_then(|r| user_group(user, r).cloned()),
                 input: String::new(),
+                prompt: None,
             };
+        }
+        Key::Char('s') => {
+            let accounts: Vec<ConfigDir> = app
+                .scope
+                .config
+                .accounts
+                .iter()
+                .map(|a| a.dir.clone())
+                .collect();
+            if accounts.is_empty() {
+                app.flash(
+                    "no accounts: add [accounts] to ~/.config/agentty/config.toml".into(),
+                    now,
+                );
+            } else {
+                return vec![Effect::ScanSkills(accounts)];
+            }
         }
         Key::Char('w') => {
             let n = app.scope.config.workspaces.len();
@@ -454,7 +490,19 @@ fn on_outcome(app: &mut App, outcome: Outcome, now: At) -> Vec<Effect> {
             .into_iter()
             .chain([Effect::Attach { dir, job }])
             .collect(),
-        Outcome::Attached | Outcome::Committed => vec![],
+        Outcome::Skills(inv) => {
+            app.skills = Some(match app.skills.take() {
+                Some(view) => view.rescanned(inv),
+                None => SkillsView::new(inv),
+            });
+            vec![]
+        }
+        // Back from a share-skill agent: show what it changed.
+        Outcome::Attached => match &app.skills {
+            Some(view) => vec![Effect::ScanSkills(view.inv.accounts.clone())],
+            None => vec![],
+        },
+        Outcome::Committed => vec![],
         Outcome::Failed(msg) => {
             app.flash(msg, now);
             vec![]
@@ -726,29 +774,33 @@ pub fn render(frame: &mut Frame, app: &App, snap: &Snapshot, user: &UserState, n
     .areas(frame.area());
     frame.render_widget(Paragraph::new(header(app, snap, now, top.width)), top);
 
-    let current = sel
-        .and_then(|i| lines[i].target())
-        .and_then(|t| snap.rows.iter().find(|r| &r.key == t.row()));
-    let mut list_area = body;
-    if app.detail
-        && let Some(row) = current
-    {
-        let wide = body.width >= 120;
-        let [list, pane] = if wide {
-            Layout::horizontal([Constraint::Min(0), Constraint::Percentage(40)]).areas(body)
-        } else {
-            Layout::vertical([Constraint::Min(0), Constraint::Percentage(40)]).areas(body)
-        };
-        list_area = list;
-        render_detail(
-            frame,
-            pane,
-            row,
-            user,
-            if wide { Borders::LEFT } else { Borders::TOP },
-        );
+    if let Some(view) = &app.skills {
+        skills_view::render(frame, body, app, view, user);
+    } else {
+        let current = sel
+            .and_then(|i| lines[i].target())
+            .and_then(|t| snap.rows.iter().find(|r| &r.key == t.row()));
+        let mut list_area = body;
+        if app.detail
+            && let Some(row) = current
+        {
+            let wide = body.width >= 120;
+            let [list, pane] = if wide {
+                Layout::horizontal([Constraint::Min(0), Constraint::Percentage(40)]).areas(body)
+            } else {
+                Layout::vertical([Constraint::Min(0), Constraint::Percentage(40)]).areas(body)
+            };
+            list_area = list;
+            render_detail(
+                frame,
+                pane,
+                row,
+                user,
+                if wide { Borders::LEFT } else { Borders::TOP },
+            );
+        }
+        render_list(frame, list_area, &lines, sel, now);
     }
-    render_list(frame, list_area, &lines, sel, now);
     frame.render_widget(Paragraph::new(footer(app, now)), foot);
 
     match &app.mode {
@@ -766,7 +818,10 @@ pub fn render(frame: &mut Frame, app: &App, snap: &Snapshot, user: &UserState, n
 }
 
 pub fn dump(app: &App, snap: &Snapshot, user: &UserState, now: At, width: u16) -> String {
-    let body: usize = layout(snap, user, app).iter().map(Line::height).sum();
+    let body: usize = match &app.skills {
+        Some(view) => view.height(),
+        None => layout(snap, user, app).iter().map(Line::height).sum(),
+    };
     let height = u16::try_from(body + 2).unwrap_or(u16::MAX);
     let mut term = Terminal::new(ratatui::backend::TestBackend::new(width, height))
         .expect("TestBackend is infallible");
@@ -831,6 +886,9 @@ fn header(app: &App, snap: &Snapshot, now: At, width: u16) -> TLine<'static> {
         Some(w) => left.push(Span::styled(format!(" · {}", w.name), bold)),
         None if !app.scope.config.workspaces.is_empty() => left.push(Span::styled(" · all", dim())),
         None => {}
+    }
+    if app.skills.is_some() {
+        left.push(Span::styled(" · skills", bold));
     }
     left.push(Span::raw(format!("  {live} live")));
     for (rank, what, color) in [
@@ -927,11 +985,12 @@ fn footer(app: &App, now: At) -> TLine<'static> {
                 format!(" {}", f.text),
                 Style::new().fg(Color::Yellow),
             )),
+            _ if app.skills.is_some() => TLine::from(Span::styled(skills_view::FOOTER, dim())),
             _ => TLine::from(Span::styled(
                 if app.scope.config.workspaces.is_empty() {
-                    " j/k move  l expand  ⏎ open  tab detail  r label  m move  n new  / filter  q quit"
+                    " j/k move  l expand  ⏎ open  tab detail  r label  m move  n new  s skills  / filter  q quit"
                 } else {
-                    " j/k move  l expand  ⏎ open  tab detail  r label  m move  n new  w workspace  / filter  q quit"
+                    " j/k move  l expand  ⏎ open  tab detail  r label  m move  n new  w workspace  s skills  / filter  q quit"
                 },
                 dim(),
             )),
@@ -947,10 +1006,12 @@ fn footer(app: &App, now: At) -> TLine<'static> {
             accounts,
             choice,
             input,
+            prompt: first,
             ..
         } => prompt(
             &format!(
-                "new on {} · name (optional): ",
+                "{} on {} · name (optional): ",
+                if first.is_some() { "agent" } else { "new" },
                 app.scope.config.account_name(&accounts[*choice])
             ),
             input,
@@ -1221,6 +1282,8 @@ fn render_help(frame: &mut Frame, body: Rect, snap: &Snapshot) {
         "n         new bg claude here, attached (cwd, group; the",
         "          workspace account with the most room, tab picks)",
         "w         next workspace, then all",
+        "s         skills across accounts: ⏎ starts a share-skill",
+        "          agent, x keeps a skill local, r rescans",
         "5h 7d     account usage  ↺ reset since seen  bold: n's pick",
         "/         filter          q esc quit",
         "",
@@ -1387,6 +1450,7 @@ mod tests {
         Count, Detail, DiagSource, Diagnostic, JobId, JobOutcome, Need, Node, PaneId, Parked, Pid,
         ProcStart, SessionId, TaskOutcome, WaitingFor,
     };
+    use crate::skills::Cell;
 
     const NOW: At = At(1_000_000_000);
 
@@ -1900,6 +1964,7 @@ mod tests {
                 },
             ],
             accounts: vec![personal, wukong, jnj],
+            shared_skills: Some("/h/.claude-personal/skills".into()),
         }
     }
 
@@ -1969,6 +2034,7 @@ mod tests {
             cwd: "/w/blade".into(),
             group: None,
             name: None,
+            prompt: None,
         };
         press(&mut app, &s, &user, &[Key::Char('n')]);
         assert!(dump(&app, &s, &user, NOW, 120).contains("new on wukong · name (optional)"));
@@ -2016,6 +2082,7 @@ mod tests {
             cwd: "/w/src".into(),
             group: Some(GroupName("side".into())),
             name: name.map(str::to_owned),
+            prompt: None,
         };
         assert_eq!(
             press(&mut app, &s, &user, &[Key::Char('n'), Key::Enter]),
@@ -2209,6 +2276,188 @@ mod tests {
         assert!(app.detail);
         press(&mut app, &s, &user, &[Key::Char('p')]);
         assert!(!app.detail);
+    }
+
+    /// jot lives in personal (wukong links it, jnj lacks it), verify is jnj's own, and
+    /// danger-keys is shared everywhere.
+    fn inventory(config: &Config) -> Inventory {
+        let dirs: Vec<ConfigDir> = config.accounts.iter().map(|a| a.dir.clone()).collect();
+        let has = |p: &str, linked| Cell::Has {
+            real: p.into(),
+            linked,
+        };
+        let skill = |name: &str, cells: Vec<Cell>| crate::skills::Skill {
+            name: name.into(),
+            cells,
+            differ: false,
+        };
+        let jot = "/h/.claude-personal/skills/jot";
+        let keys = "/h/.claude-personal/skills/danger-keys";
+        Inventory {
+            folders: vec![
+                Some("/h/.claude-personal/skills".into()),
+                Some("/h/.claude-personal/skills".into()),
+                Some("/h/.claude-jnj/skills".into()),
+            ],
+            accounts: dirs,
+            skills: vec![
+                skill(
+                    "danger-keys",
+                    vec![has(keys, false), has(keys, true), has(keys, true)],
+                ),
+                skill("jot", vec![has(jot, false), has(jot, true), Cell::Missing]),
+                skill(
+                    "verify",
+                    vec![
+                        Cell::Missing,
+                        Cell::Missing,
+                        has("/h/.claude-jnj/skills/verify", false),
+                    ],
+                ),
+            ],
+        }
+    }
+
+    fn skills_text(app: &App, user: &UserState) -> Vec<String> {
+        dump(app, &snap(vec![]), user, NOW, 120)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn s_scans_every_account_and_the_view_puts_skills_needing_action_first() {
+        let config = workspaces();
+        let accounts: Vec<ConfigDir> = config.accounts.iter().map(|a| a.dir.clone()).collect();
+        let inv = inventory(&config);
+        let s = snap(vec![]);
+        let mut user = UserState::default();
+        let mut app = App::new(false).scoped(config, None, "/w".into());
+        assert_eq!(
+            press(&mut app, &s, &user, &[Key::Char('s')]),
+            [Effect::ScanSkills(accounts.clone())]
+        );
+        update(&mut app, &s, &user, Input::Done(Outcome::Skills(inv)), NOW);
+        let text = skills_text(&app, &user);
+        assert!(text[0].starts_with(" agentty · all · skills"), "{text:?}");
+        assert_eq!(text[1], "  skill        personal  wukong  jnj");
+        assert_eq!(
+            text[2],
+            "› jot          ●         →       ·    missing on jnj"
+        );
+        assert_eq!(
+            text[3],
+            "  verify       ·         ·       ●    missing on personal, wukong"
+        );
+        assert_eq!(text[4], "  danger-keys  ●         →       →    shared");
+        assert!(
+            text[5].contains("one skills folder: personal = wukong"),
+            "{text:?}"
+        );
+
+        let x = press(&mut app, &s, &user, &[Key::Char('j'), Key::Char('x')]);
+        let local = Op::SetSkillLocal {
+            name: "verify".into(),
+            local: true,
+        };
+        assert_eq!(x, [Effect::Commit(local.clone())]);
+        user.apply(&local);
+        let text = skills_text(&app, &user);
+        assert!(
+            text[4].starts_with("› verify") && text[4].ends_with("keep local"),
+            "{text:?}"
+        );
+        assert_eq!(
+            press(&mut app, &s, &user, &[Key::Char('x')]),
+            [Effect::Commit(Op::SetSkillLocal {
+                name: "verify".into(),
+                local: false,
+            })]
+        );
+
+        assert_eq!(
+            update(&mut app, &s, &user, Input::Done(Outcome::Attached), NOW),
+            [Effect::ScanSkills(accounts)]
+        );
+        press(&mut app, &s, &user, &[Key::Esc]);
+        assert!(app.skills.is_none());
+        assert_eq!(press(&mut app, &s, &user, &[Key::Esc]), [Effect::Quit]);
+    }
+
+    #[test]
+    fn enter_starts_a_share_skill_agent_with_the_prompt_on_the_roomiest_account() {
+        let config = workspaces();
+        let inv = inventory(&config);
+        let (personal, wukong) = (
+            config.accounts[0].dir.clone(),
+            config.accounts[1].dir.clone(),
+        );
+        let mut s = snap(vec![]);
+        s.limits = BTreeMap::from([
+            (personal, limits(90.0, At(NOW.0 + 3_600_000))),
+            (wukong.clone(), limits(10.0, At(NOW.0 + 3_600_000))),
+        ]);
+        let user = UserState::default();
+        let mut app = App::new(false)
+            .scoped(config, Some(0), "/w/blade/api".into())
+            .with_skills(inv.clone());
+        press(&mut app, &s, &user, &[Key::Enter]);
+        let footer = dump(&app, &s, &user, NOW, 120);
+        assert!(
+            footer.contains("agent on wukong · name (optional): share jot"),
+            "{footer}"
+        );
+        let effects = press(&mut app, &s, &user, &[Key::Enter]);
+        let shared = Path::new("/h/.claude-personal/skills");
+        let names = |d: &ConfigDir| app.scope.config.account_name(d);
+        assert_eq!(
+            effects,
+            [Effect::NewSession {
+                dir: wukong,
+                cwd: "/w/blade/api".into(),
+                group: None,
+                name: Some("share jot".into()),
+                prompt: Some(inv.share_prompt(&inv.skills[1], shared, names)),
+            }]
+        );
+        assert!(
+            app.skills.is_some(),
+            "the view stays for when the agent returns"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_shared_skill_or_without_a_shared_folder_only_flashes() {
+        let mut config = workspaces();
+        let inv = inventory(&config);
+        let s = snap(vec![]);
+        let user = UserState::default();
+        let mut app = App::new(false)
+            .scoped(config.clone(), None, "/w".into())
+            .with_skills(inv.clone());
+        assert_eq!(
+            press(&mut app, &s, &user, &[Key::Char('G'), Key::Enter]),
+            []
+        );
+        assert!(
+            skills_text(&app, &user)
+                .last()
+                .unwrap()
+                .contains("already shared")
+        );
+
+        config.shared_skills = None;
+        let mut app = App::new(false)
+            .scoped(config, None, "/w".into())
+            .with_skills(inv);
+        assert_eq!(press(&mut app, &s, &user, &[Key::Enter]), []);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            skills_text(&app, &user)
+                .last()
+                .unwrap()
+                .contains("[skills] shared")
+        );
     }
 
     #[test]

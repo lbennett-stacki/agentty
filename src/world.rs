@@ -5,6 +5,7 @@ use std::process::Command;
 
 use crate::derive::{ExitedView, SessionView};
 use crate::jobs::{self, Job};
+use crate::limits::RefusalScan;
 use crate::model::{
     At, ConfigDir, DiagSource, Diagnostic, JobId, Limits, PaneId, PaneInfo, Pid, Problem,
     ProcStart, SessionId,
@@ -130,6 +131,7 @@ pub struct World {
     tasks: HashMap<(ConfigDir, SessionId), (Vec<FileStamp>, Vec<Task>)>,
     statusline: HashMap<SessionId, Statusline>,
     limits_cache: HashMap<ConfigDir, (FileStamp, Option<Limits>)>,
+    refusals: RefusalScan,
     teams: BTreeMap<PathBuf, (FileStamp, Team)>,
     repos: HashMap<PathBuf, Option<PathBuf>>,
     proc_starts: HashMap<Pid, ProcStart>,
@@ -169,6 +171,7 @@ impl World {
             tasks: HashMap::new(),
             statusline: HashMap::new(),
             limits_cache: HashMap::new(),
+            refusals: RefusalScan::default(),
             teams: BTreeMap::new(),
             repos: HashMap::new(),
             proc_starts: HashMap::new(),
@@ -198,6 +201,7 @@ impl World {
         if tick {
             self.pump_transcripts(now);
             self.refresh_limits_cache();
+            self.refusals.refresh(&self.dirs, now);
             match self.host.panes() {
                 Ok(panes) => self.panes = panes,
                 Err(HostError) => {
@@ -673,11 +677,14 @@ impl World {
             .collect()
     }
 
-    /// Each account's usage as `/usage` last cached it.
-    pub fn cached_limits(&self) -> impl Iterator<Item = (&ConfigDir, Limits)> {
+    /// Each account's limits as `/usage` last cached them, and every window a recent refusal
+    /// shows full. `derive` merges these with the live statusline tees.
+    pub fn observed_limits(&self) -> Vec<(ConfigDir, Limits)> {
         self.limits_cache
             .iter()
-            .filter_map(|(dir, (_, usage))| Some((dir, (*usage)?)))
+            .filter_map(|(dir, (_, usage))| Some((dir.clone(), (*usage)?)))
+            .chain(self.refusals.limits(self.host.now()))
+            .collect()
     }
 
     pub fn diagnostics(&self) -> &[Diagnostic] {

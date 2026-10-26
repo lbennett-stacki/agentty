@@ -1,6 +1,7 @@
 mod config;
 mod derive;
 mod jobs;
+mod limits;
 mod model;
 mod registry;
 mod sidecars;
@@ -132,7 +133,7 @@ fn snapshot(world: &World) -> Snapshot {
     derive::snapshot(
         world.sessions(),
         world.exited(now).into_iter(),
-        world.cached_limits(),
+        world.observed_limits(),
         world.diagnostics(),
         now,
     )

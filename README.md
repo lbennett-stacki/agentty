@@ -96,7 +96,11 @@ agentty opens on the workspace whose `root` holds the directory you start it in,
 
 The header shows each workspace account's 5-hour and 7-day usage, such as `personal 5h 12% 7d 52%  wukong 7d ↺`. `↺` means the window has reset since agentty last saw it. A dim age such as `(1d)` means the numbers are that old. `n` starts new sessions on the account with the most room: one with no full window, then the least 7-day use, then the least 5-hour use. That account's name is bold.
 
-Usage comes from two places. Claude Code passes it to your statusline script, so the statusline tee below keeps it current while any session of that account is on screen. Claude Code also caches it in the account's `.claude.json` whenever you open `/usage`. agentty uses whichever is newer.
+Usage comes from three places, and agentty uses the newest for each window:
+
+- Claude Code passes it to your statusline script, so the statusline tee below keeps it current while any session of that account is on screen.
+- Claude Code caches it in the account's `.claude.json` whenever you open `/usage`.
+- When an account runs out, the API refuses the next request and the session's transcript records which window is full and when it resets. agentty reads the last week of transcripts for these refusals, so a full account shows 100% even when none of its sessions is open. It credits each refusal to the account whose `history.jsonl` sent that session's last prompt before it, because config dirs can share `projects/` and a session can be resumed on another account.
 
 ## Context and cost
 
@@ -119,6 +123,7 @@ agentty scans `~/.claude` and every `~/.claude-*` directory that has a `sessions
 - `jobs/<id>/state.json` for bg jobs. agentty does not read the `providerEnv` field, which holds credentials.
 - `tasks/<session>/`, `teams/*/config.json`, and the optional statusline cache.
 - The usage cache (`cachedUsageUtilization`) in each account's `.claude.json` (`~/.claude.json` for `~/.claude`). It reads no other field of that file.
+- Rate-limit refusals (`quotaLimits`) in transcripts written in the last week, and each account's `history.jsonl` session ids and times, to tell which account was refused. From `history.jsonl` it keeps only those two fields, never the prompt text.
 
 It shows Bash background work by its description, never by its command line. It removes token-shaped strings from every label before display.
 

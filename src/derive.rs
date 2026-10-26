@@ -41,22 +41,32 @@ const DETAIL_FRESH_MS: i64 = 2 * 60 * 1000;
 pub fn snapshot<'a>(
     sessions: impl Iterator<Item = SessionView<'a>>,
     exited: impl Iterator<Item = ExitedView<'a>>,
-    cached_limits: impl Iterator<Item = (&'a ConfigDir, Limits)>,
+    observed_limits: Vec<(ConfigDir, Limits)>,
     world_diagnostics: &[Diagnostic],
     now: At,
 ) -> Snapshot {
     let mut snap = Snapshot {
         rows: Vec::new(),
         diagnostics: world_diagnostics.to_vec(),
-        limits: cached_limits.map(|(d, u)| (d.clone(), u)).collect(),
+        limits: BTreeMap::new(),
     };
+    let mut observe = |dir: &ConfigDir, seen: Limits| {
+        snap.limits
+            .entry(dir.clone())
+            .and_modify(|l| *l = l.merge(seen))
+            .or_insert(seen);
+    };
+    for (dir, seen) in &observed_limits {
+        observe(dir, *seen);
+    }
+    let mut live = Vec::new();
     for v in sessions {
         if let Some(seen) = v.statusline.and_then(|s| s.limits) {
-            snap.limits
-                .entry(v.dir.clone())
-                .and_modify(|u| *u = u.merge(seen))
-                .or_insert(seen);
+            observe(v.dir, seen);
         }
+        live.push(v);
+    }
+    for v in live {
         if v.reg.hidden {
             continue;
         }
@@ -1314,13 +1324,7 @@ mod tests {
                 asked_question: false
             }
         );
-        let snap = snapshot(
-            [fx.view()].into_iter(),
-            std::iter::empty(),
-            std::iter::empty(),
-            &[],
-            T0,
-        );
+        let snap = snapshot([fx.view()].into_iter(), std::iter::empty(), vec![], &[], T0);
         assert_eq!(snap.rows.len(), 1);
         assert_eq!(
             snap.diagnostics
@@ -1759,7 +1763,7 @@ mod tests {
         let snap = snapshot(
             [fx.view()].into_iter(),
             std::iter::empty(),
-            [(&fx.dir, cached)].into_iter(),
+            vec![(fx.dir.clone(), cached)],
             &[],
             T0,
         );
@@ -2191,7 +2195,7 @@ mod tests {
                 facts: None,
             }]
             .into_iter(),
-            std::iter::empty(),
+            vec![],
             &[],
             T0,
         );

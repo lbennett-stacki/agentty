@@ -375,7 +375,7 @@ fn normal(
 fn on_outcome(app: &mut App, outcome: Outcome, now: At) -> Vec<Effect> {
     let quit = app.popup.then_some(Effect::Quit);
     match outcome {
-        Outcome::Jumped | Outcome::Attached => quit.into_iter().collect(),
+        Outcome::Jumped => quit.into_iter().collect(),
         Outcome::Spawned { session, group } => group
             .map(|g| {
                 Effect::Commit(Op::SetGroup {
@@ -386,7 +386,7 @@ fn on_outcome(app: &mut App, outcome: Outcome, now: At) -> Vec<Effect> {
             .into_iter()
             .chain(quit)
             .collect(),
-        Outcome::Committed => vec![],
+        Outcome::Attached | Outcome::Committed => vec![],
         Outcome::Failed(msg) => {
             app.flash(msg, now);
             vec![]
@@ -397,13 +397,10 @@ fn on_outcome(app: &mut App, outcome: Outcome, now: At) -> Vec<Effect> {
 fn open(app: &mut App, row: &Row, now: At) -> Vec<Effect> {
     match &row.open {
         OpenTarget::Pane(p) => vec![Effect::Jump(p.clone())],
-        OpenTarget::Attach { dir, job, title } => {
-            vec![Effect::Attach {
-                dir: dir.clone(),
-                job: job.clone(),
-                title: title.clone(),
-            }]
-        }
+        OpenTarget::Attach { dir, job } => vec![Effect::Attach {
+            dir: dir.clone(),
+            job: job.clone(),
+        }],
         OpenTarget::Unreachable(msg) => {
             app.flash(msg.clone(), now);
             vec![]
@@ -1072,7 +1069,7 @@ fn render_help(frame: &mut Frame, body: Rect, snap: &Snapshot) {
     let mut text: Vec<TLine> = [
         "j/k ↑/↓   move            g/G   top / bottom",
         "l → space expand          h ←   collapse",
-        "⏎         jump to the pane, or attach a bg job",
+        "⏎         jump to the pane, or attach a bg job here (^Z back)",
         "tab p     detail pane     r     label",
         "m         move to group (- automatic)",
         "n         new claude here (same dir, cwd, group)",
@@ -1695,7 +1692,6 @@ mod tests {
         r.open = OpenTarget::Attach {
             dir: dir.clone(),
             job: JobId("0a1b2c3d".into()),
-            title: "fees".into(),
         };
         let s = snap(vec![r]);
         let fx = press(
@@ -1709,8 +1705,23 @@ mod tests {
             [Effect::Attach {
                 dir,
                 job: JobId("0a1b2c3d".into()),
-                title: "fees".into()
             }]
+        );
+    }
+
+    #[test]
+    fn the_popup_stays_open_after_an_attach_returns() {
+        let s = snap(vec![pane_row()]);
+        let mut app = App::new(true);
+        assert_eq!(
+            update(
+                &mut app,
+                &s,
+                &UserState::default(),
+                Input::Done(Outcome::Attached),
+                NOW
+            ),
+            []
         );
     }
 

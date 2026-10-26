@@ -63,7 +63,7 @@ Rows group by your own groups first, then by team, then by git repository (workt
 | `g` `G` | go to top or bottom |
 | `l`, `→`, space | expand the subagent tree |
 | `h`, `←` | collapse |
-| Enter | open the session: switch to its tmux pane, or open a new window that runs `claude attach <job>` for a bg job |
+| Enter | open the session: switch to its tmux pane, or, for a bg job, run `claude attach <job>` right here in agentty's place. Ctrl+Z detaches and brings agentty back (← opens Claude Code's own agent view instead). Attaching works outside tmux too. |
 | tab, `p` | show the detail pane (last prompt, last reply, open tasks, pending work, ids) |
 | `r` | set a label (an empty label clears it) |
 | `m` | move to a group. Type a new name to create a group, or `-` to return the row to its automatic group. |

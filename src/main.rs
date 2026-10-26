@@ -12,13 +12,14 @@ mod world;
 use std::collections::VecDeque;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use notify::Watcher;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use ratatui::crossterm::{execute, terminal};
 
 use model::{
     ConfigDir, DiagSource, Diagnostic, Effect, JobId, Outcome, PaneId, Problem, Row, SessionId,
@@ -41,6 +42,8 @@ struct Args {
 
 const TICK: Duration = Duration::from_secs(1);
 const MIN_REFRESH: Duration = Duration::from_millis(250);
+/// How long a pause waits, at most, for the input thread to stop reading the terminal.
+const INPUT_POLL: Duration = Duration::from_millis(50);
 const DUMP_MAX_REFRESHES: usize = 20;
 
 const DUMP_WIDTH: u16 = 160;
@@ -87,9 +90,14 @@ fn main() -> anyhow::Result<()> {
     }
 
     let (tx, rx) = mpsc::channel();
-    spawn_input(tx.clone());
+    let input = Arc::new(InputGate::default());
+    spawn_input(tx.clone(), input.clone());
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, tx, rx, &mut world, &mut store, &mut app);
+    let mut screen = Screen {
+        terminal: &mut terminal,
+        input: &input,
+    };
+    let result = run(&mut screen, tx, rx, &mut world, &mut store, &mut app);
     ratatui::restore();
     result
 }
@@ -105,7 +113,7 @@ fn snapshot(world: &World) -> Snapshot {
 }
 
 fn run(
-    terminal: &mut ratatui::DefaultTerminal,
+    screen: &mut Screen,
     tx: mpsc::Sender<Msg>,
     rx: mpsc::Receiver<Msg>,
     world: &mut World,
@@ -140,7 +148,7 @@ fn run(
                 }
                 Msg::Term(Event::Key(k)) => {
                     if let Some(key) = ui::key_of(&k)
-                        && dispatch(app, &snap, store, ui::Input::Key(key), world.now())
+                        && dispatch(app, &snap, store, screen, ui::Input::Key(key), world.now())
                     {
                         return Ok(());
                     }
@@ -190,7 +198,9 @@ fn run(
                 next_tick = if deferred { now } else { now + TICK };
             }
         }
-        terminal.draw(|f| ui::render(f, app, &snap, store.state(), world.now()))?;
+        screen
+            .terminal
+            .draw(|f| ui::render(f, app, &snap, store.state(), world.now()))?;
     }
 }
 
@@ -198,12 +208,13 @@ fn dispatch(
     app: &mut ui::App,
     snap: &Snapshot,
     store: &mut user_state::Store,
+    screen: &mut Screen,
     input: ui::Input,
     now: model::At,
 ) -> bool {
     let mut queue: VecDeque<Effect> = ui::update(app, snap, store.state(), input, now).into();
     while let Some(effect) = queue.pop_front() {
-        match execute(effect, store) {
+        match execute(effect, store, screen) {
             None => return true,
             Some(outcome) => {
                 queue.extend(ui::update(
@@ -229,25 +240,16 @@ fn existing_watch_roots(world: &World, state_file: &Path) -> Vec<PathBuf> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ClaudeRun {
-    Attach(JobId),
-    New {
-        session: SessionId,
-        name: Option<String>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TmuxCmd {
     /// Existence check: `list-panes -t %N` exits 1 when the pane is gone; `display -p -t %N`
     /// exits 0.
     ListPane(PaneId),
     SwitchClient(PaneId),
     NewWindow {
-        name: String,
-        cwd: Option<PathBuf>,
+        cwd: PathBuf,
         config_dir: ConfigDir,
-        run: ClaudeRun,
+        session: SessionId,
+        name: Option<String>,
     },
 }
 
@@ -260,28 +262,25 @@ impl TmuxCmd {
             }
             // tmux execs a multi-argument command without `sh -c`, so no element needs quoting.
             TmuxCmd::NewWindow {
-                name,
                 cwd,
                 config_dir,
-                run,
+                session,
+                name,
             } => {
-                let mut v = vec!["new-window".into(), "-n".into(), name.clone()];
-                if let Some(cwd) = cwd {
-                    v.extend(["-c".into(), cwd.display().to_string()]);
-                }
-                v.extend([
+                let mut v = vec![
+                    "new-window".into(),
+                    "-n".into(),
+                    name.as_deref().unwrap_or("claude").into(),
+                    "-c".into(),
+                    cwd.display().to_string(),
                     "-e".into(),
                     format!("CLAUDE_CONFIG_DIR={}", config_dir.0.display()),
                     "claude".into(),
-                ]);
-                match run {
-                    ClaudeRun::Attach(job) => v.extend(["attach".into(), job.0.clone()]),
-                    ClaudeRun::New { session, name } => {
-                        v.extend(["--session-id".into(), session.0.clone()]);
-                        if let Some(name) = name {
-                            v.extend(["--name".into(), name.clone()]);
-                        }
-                    }
+                    "--session-id".into(),
+                    session.0.clone(),
+                ];
+                if let Some(name) = name {
+                    v.extend(["--name".into(), name.clone()]);
                 }
                 v
             }
@@ -289,13 +288,93 @@ impl TmuxCmd {
     }
 }
 
-fn execute(effect: Effect, store: &mut user_state::Store) -> Option<Outcome> {
+fn claude_attach(dir: &ConfigDir, job: &JobId) -> Command {
+    let mut cmd = Command::new("claude");
+    cmd.args(["attach", &job.0])
+        .env("CLAUDE_CONFIG_DIR", &dir.0);
+    cmd
+}
+
+/// The terminal, and the gate that keeps the input thread off it while a child owns it.
+struct Screen<'a> {
+    terminal: &'a mut ratatui::DefaultTerminal,
+    input: &'a InputGate,
+}
+
+impl Screen<'_> {
+    /// Runs `cmd` in the foreground on this terminal, then takes the terminal back and repaints.
+    fn hand_over(&mut self, cmd: &mut Command) -> std::io::Result<ExitStatus> {
+        self.input.pause();
+        ratatui::restore();
+        let status = cmd.status();
+        let back = terminal::enable_raw_mode()
+            .and_then(|()| execute!(std::io::stdout(), terminal::EnterAlternateScreen))
+            .and_then(|()| self.terminal.clear());
+        self.input.resume();
+        back.and(status)
+    }
+}
+
+#[derive(Default)]
+struct InputGate {
+    state: Mutex<Gate>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct Gate {
+    paused: bool,
+    /// The input thread is not reading the terminal: it is waiting on `paused`, or it has exited.
+    parked: bool,
+}
+
+impl InputGate {
+    /// Returns once the input thread has stopped reading, so the next keystroke reaches the child.
+    fn pause(&self) {
+        let mut g = self.state.lock().unwrap();
+        g.paused = true;
+        while !g.parked {
+            g = self.changed.wait(g).unwrap();
+        }
+    }
+
+    fn resume(&self) {
+        self.state.lock().unwrap().paused = false;
+        self.changed.notify_all();
+    }
+
+    /// Called by the input thread between reads.
+    fn wait_while_paused(&self) {
+        let mut g = self.state.lock().unwrap();
+        if !g.paused {
+            return;
+        }
+        g.parked = true;
+        self.changed.notify_all();
+        while g.paused {
+            g = self.changed.wait(g).unwrap();
+        }
+        g.parked = false;
+    }
+
+    fn close(&self) {
+        self.state.lock().unwrap().parked = true;
+        self.changed.notify_all();
+    }
+}
+
+fn execute(effect: Effect, store: &mut user_state::Store, screen: &mut Screen) -> Option<Outcome> {
     let failed = |what: &str| Outcome::Failed(what.to_owned());
     Some(match effect {
         Effect::Quit => return None,
         Effect::Commit(op) => match store.commit(&op) {
             Ok(()) => Outcome::Committed,
             Err(e) => Outcome::Failed(format!("could not save state: {e}")),
+        },
+        Effect::Attach { dir, job } => match screen.hand_over(&mut claude_attach(&dir, &job)) {
+            Ok(status) if status.success() => Outcome::Attached,
+            Ok(status) => Outcome::Failed(format!("claude attach failed ({status})")),
+            Err(e) => Outcome::Failed(format!("could not run claude attach: {e}")),
         },
         _ if std::env::var_os("TMUX").is_none() => failed("not inside tmux"),
         Effect::Jump(pane) => {
@@ -307,19 +386,6 @@ fn execute(effect: Effect, store: &mut user_state::Store) -> Option<Outcome> {
                 Outcome::Jumped
             }
         }
-        Effect::Attach { dir, job, title } => {
-            let cmd = TmuxCmd::NewWindow {
-                name: title,
-                cwd: None,
-                config_dir: dir,
-                run: ClaudeRun::Attach(job),
-            };
-            if tmux(&cmd) {
-                Outcome::Attached
-            } else {
-                failed("tmux new-window failed")
-            }
-        }
         Effect::NewSession {
             dir,
             cwd,
@@ -329,13 +395,10 @@ fn execute(effect: Effect, store: &mut user_state::Store) -> Option<Outcome> {
             Err(e) => Outcome::Failed(format!("could not mint a session id: {e}")),
             Ok(session) => {
                 let cmd = TmuxCmd::NewWindow {
-                    name: name.clone().unwrap_or_else(|| "claude".into()),
-                    cwd: Some(cwd),
+                    cwd,
                     config_dir: dir,
-                    run: ClaudeRun::New {
-                        session: session.clone(),
-                        name,
-                    },
+                    session: session.clone(),
+                    name,
                 };
                 if tmux(&cmd) {
                     Outcome::Spawned { session, group }
@@ -395,13 +458,21 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<Args> {
     Ok(out)
 }
 
-fn spawn_input(tx: mpsc::Sender<Msg>) {
+fn spawn_input(tx: mpsc::Sender<Msg>, gate: Arc<InputGate>) {
     std::thread::spawn(move || {
-        while let Ok(ev) = event::read() {
+        loop {
+            gate.wait_while_paused();
+            match event::poll(INPUT_POLL) {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(_) => break,
+            }
+            let Ok(ev) = event::read() else { break };
             if tx.send(Msg::Term(ev)).is_err() {
                 break;
             }
         }
+        gate.close();
     });
 }
 
@@ -445,38 +516,26 @@ mod tests {
     }
 
     #[test]
-    fn attach_window_passes_config_dir_and_keeps_the_title_whole() {
-        let cmd = TmuxCmd::NewWindow {
-            name: "docs sweep".into(),
-            cwd: None,
-            config_dir: dir(),
-            run: ClaudeRun::Attach(JobId("0a1b2c3d".into())),
-        };
+    fn attach_runs_claude_attach_under_the_job_config_dir() {
+        let cmd = claude_attach(&dir(), &JobId("0a1b2c3d".into()));
+        assert_eq!(cmd.get_program(), "claude");
+        assert_eq!(cmd.get_args().collect::<Vec<_>>(), ["attach", "0a1b2c3d"]);
         assert_eq!(
-            cmd.argv(),
-            [
-                "new-window",
-                "-n",
-                "docs sweep",
-                "-e",
-                "CLAUDE_CONFIG_DIR=/Users/u/.claude-personal",
-                "claude",
-                "attach",
-                "0a1b2c3d"
-            ]
+            cmd.get_envs().collect::<Vec<_>>(),
+            [(
+                "CLAUDE_CONFIG_DIR".as_ref(),
+                Some("/Users/u/.claude-personal".as_ref())
+            )]
         );
     }
 
     #[test]
     fn new_session_window_runs_claude_with_session_id_and_optional_name() {
         let new = |name: Option<&str>| TmuxCmd::NewWindow {
-            name: name.unwrap_or("claude").into(),
-            cwd: Some("/w/my repo".into()),
+            cwd: "/w/my repo".into(),
             config_dir: dir(),
-            run: ClaudeRun::New {
-                session: SessionId("0b6c2f7e-1c1a-4d2b-9a8e-3f4a5b6c7d8e".into()),
-                name: name.map(str::to_owned),
-            },
+            session: SessionId("0b6c2f7e-1c1a-4d2b-9a8e-3f4a5b6c7d8e".into()),
+            name: name.map(str::to_owned),
         };
         assert_eq!(
             new(Some("fix the bug")).argv(),

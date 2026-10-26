@@ -560,11 +560,7 @@ pub struct Detail {
 #[derive(Clone, Debug, PartialEq)]
 pub enum OpenTarget {
     Pane(PaneId),
-    Attach {
-        dir: ConfigDir,
-        job: JobId,
-        title: String,
-    },
+    Attach { dir: ConfigDir, job: JobId },
     Unreachable(String),
 }
 
@@ -625,7 +621,6 @@ pub enum Effect {
     Attach {
         dir: ConfigDir,
         job: JobId,
-        title: String,
     },
     NewSession {
         dir: ConfigDir,

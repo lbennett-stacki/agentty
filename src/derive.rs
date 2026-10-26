@@ -128,7 +128,7 @@ pub fn live_row(v: SessionView<'_>, now: At) -> Row {
         meta: meta(&v),
         tree: tree(&v, &agents, now),
         detail: detail(&v, &agents, now),
-        open: open_target(&v, &title),
+        open: open_target(&v),
         title,
         status,
     }
@@ -179,7 +179,6 @@ pub fn exited_row(v: ExitedView<'_>) -> Row {
         open: OpenTarget::Attach {
             dir: v.dir.clone(),
             job: v.job.id.clone(),
-            title: title.as_str().to_owned(),
         },
         title,
     }
@@ -750,12 +749,11 @@ pub fn detail(v: &SessionView<'_>, agents: &[AgentView<'_>], now: At) -> Detail 
     }
 }
 
-pub fn open_target(v: &SessionView<'_>, title: &SafeText) -> OpenTarget {
+pub fn open_target(v: &SessionView<'_>) -> OpenTarget {
     if let Some(job) = &v.reg.job {
         return OpenTarget::Attach {
             dir: v.dir.clone(),
             job: job.clone(),
-            title: title.as_str().to_owned(),
         };
     }
     match &v.reg.pane {
@@ -1878,13 +1876,12 @@ mod tests {
     #[test]
     fn open_target_offers_a_pane_only_when_tmux_lists_it() {
         let mut fx = Fx::new(reg(RegStatus::Idle));
-        let t = SafeText::ours("t");
         fx.panes = vec![PaneInfo {
             id: PaneId::parse("%7").unwrap(),
             pid: Pid(1),
         }];
         assert_eq!(
-            open_target(&fx.view(), &t),
+            open_target(&fx.view()),
             OpenTarget::Pane(PaneId::parse("%7").unwrap())
         );
         fx.panes = vec![PaneInfo {
@@ -1892,7 +1889,7 @@ mod tests {
             pid: Pid(1),
         }];
         assert_eq!(
-            open_target(&fx.view(), &t),
+            open_target(&fx.view()),
             OpenTarget::Unreachable("tmux pane %7 is gone".into())
         );
     }
@@ -1904,14 +1901,13 @@ mod tests {
             entrypoint: "claude-vscode".into(),
             ..reg(RegStatus::Idle)
         });
-        let t = SafeText::ours("t");
         assert_eq!(
-            open_target(&fx.view(), &t),
+            open_target(&fx.view()),
             OpenTarget::Unreachable("running in VS Code".into())
         );
         fx.reg.entrypoint = "cli".into();
         assert_eq!(
-            open_target(&fx.view(), &t),
+            open_target(&fx.view()),
             OpenTarget::Unreachable("running in a terminal outside tmux".into())
         );
     }
@@ -1922,9 +1918,8 @@ mod tests {
         let expected = OpenTarget::Attach {
             dir: fx.dir.clone(),
             job: JobId("0a1b2c3d".into()),
-            title: "t".into(),
         };
-        assert_eq!(open_target(&fx.view(), &SafeText::ours("t")), expected);
+        assert_eq!(open_target(&fx.view()), expected);
 
         let j = Job {
             name: Some("t".into()),

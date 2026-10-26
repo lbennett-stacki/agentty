@@ -67,7 +67,7 @@ Rows group by your own groups first, then by team, then by git repository (workt
 | tab, `p` | show the detail pane (last prompt, last reply, open tasks, pending work, ids) |
 | `r` | set a label (an empty label clears it) |
 | `m` | move to a group. Type a new name to create a group, or `-` to return the row to its automatic group. |
-| `n` | start a new `claude` in a new tmux window, with the selected row's directory, config dir, and group |
+| `n` | start a new background `claude` (`claude --bg`) in the selected row's directory, config dir, and group, and attach to it here. Ctrl+Z comes back. |
 | `/` | filter |
 | `?` | help and diagnostics |
 | `q`, Esc | quit |

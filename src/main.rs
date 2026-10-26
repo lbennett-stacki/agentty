@@ -10,7 +10,6 @@ mod user_state;
 mod world;
 
 use std::collections::VecDeque;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -22,7 +21,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::crossterm::{execute, terminal};
 
 use model::{
-    ConfigDir, DiagSource, Diagnostic, Effect, JobId, Outcome, PaneId, Problem, Row, SessionId,
+    ConfigDir, DiagSource, Diagnostic, Effect, JobId, Outcome, PaneId, Problem, Row, SafeText,
     Snapshot,
 };
 use world::{ReadBudget, RealHost, Roots, Wake, World};
@@ -245,12 +244,6 @@ pub enum TmuxCmd {
     /// exits 0.
     ListPane(PaneId),
     SwitchClient(PaneId),
-    NewWindow {
-        cwd: PathBuf,
-        config_dir: ConfigDir,
-        session: SessionId,
-        name: Option<String>,
-    },
 }
 
 impl TmuxCmd {
@@ -260,32 +253,39 @@ impl TmuxCmd {
             TmuxCmd::SwitchClient(p) => {
                 vec!["switch-client".into(), "-t".into(), p.as_str().into()]
             }
-            // tmux execs a multi-argument command without `sh -c`, so no element needs quoting.
-            TmuxCmd::NewWindow {
-                cwd,
-                config_dir,
-                session,
-                name,
-            } => {
-                let mut v = vec![
-                    "new-window".into(),
-                    "-n".into(),
-                    name.as_deref().unwrap_or("claude").into(),
-                    "-c".into(),
-                    cwd.display().to_string(),
-                    "-e".into(),
-                    format!("CLAUDE_CONFIG_DIR={}", config_dir.0.display()),
-                    "claude".into(),
-                    "--session-id".into(),
-                    session.0.clone(),
-                ];
-                if let Some(name) = name {
-                    v.extend(["--name".into(), name.clone()]);
-                }
-                v
-            }
         }
     }
+}
+
+/// `claude --bg` picks its own session id (it ignores `--session-id`), so the job id it prints
+/// is the only handle on the new session.
+fn claude_bg(dir: &ConfigDir, cwd: &Path, name: Option<&str>) -> Command {
+    let mut cmd = Command::new("claude");
+    cmd.arg("--bg")
+        .args(name.map(|n| ["--name", n]).into_iter().flatten())
+        .current_dir(cwd)
+        .env("CLAUDE_CONFIG_DIR", &dir.0)
+        .stdin(Stdio::null());
+    cmd
+}
+
+/// Reads the id out of `backgrounded · <id> · <name> (...)`.
+fn job_from_bg_output(stdout: &str) -> Option<JobId> {
+    stdout.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("backgrounded · ")?;
+        JobId::parse(rest.split(' ').next()?)
+    })
+}
+
+fn bg_failure(stderr: &str) -> String {
+    stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map_or("claude --bg printed no job id".into(), |l| {
+            SafeText::redact(l).as_str().to_owned()
+        })
 }
 
 fn claude_attach(dir: &ConfigDir, job: &JobId) -> Command {
@@ -371,12 +371,24 @@ fn execute(effect: Effect, store: &mut user_state::Store, screen: &mut Screen) -
             Ok(()) => Outcome::Committed,
             Err(e) => Outcome::Failed(format!("could not save state: {e}")),
         },
+        Effect::NewSession {
+            dir,
+            cwd,
+            group,
+            name,
+        } => match claude_bg(&dir, &cwd, name.as_deref()).output() {
+            Err(e) => Outcome::Failed(format!("could not run claude --bg: {e}")),
+            Ok(out) => match job_from_bg_output(&String::from_utf8_lossy(&out.stdout)) {
+                Some(job) => Outcome::Spawned { dir, job, group },
+                None => Outcome::Failed(bg_failure(&String::from_utf8_lossy(&out.stderr))),
+            },
+        },
         Effect::Attach { dir, job } => match screen.hand_over(&mut claude_attach(&dir, &job)) {
             Ok(status) if status.success() => Outcome::Attached,
             Ok(status) => Outcome::Failed(format!("claude attach failed ({status})")),
             Err(e) => Outcome::Failed(format!("could not run claude attach: {e}")),
         },
-        _ if std::env::var_os("TMUX").is_none() => failed("not inside tmux"),
+        Effect::Jump(_) if std::env::var_os("TMUX").is_none() => failed("not inside tmux"),
         Effect::Jump(pane) => {
             if !tmux(&TmuxCmd::ListPane(pane.clone())) {
                 Outcome::Failed(format!("pane {} is gone", pane.as_str()))
@@ -386,27 +398,6 @@ fn execute(effect: Effect, store: &mut user_state::Store, screen: &mut Screen) -
                 Outcome::Jumped
             }
         }
-        Effect::NewSession {
-            dir,
-            cwd,
-            group,
-            name,
-        } => match mint_uuid_v4() {
-            Err(e) => Outcome::Failed(format!("could not mint a session id: {e}")),
-            Ok(session) => {
-                let cmd = TmuxCmd::NewWindow {
-                    cwd,
-                    config_dir: dir,
-                    session: session.clone(),
-                    name,
-                };
-                if tmux(&cmd) {
-                    Outcome::Spawned { session, group }
-                } else {
-                    failed("tmux new-window failed")
-                }
-            }
-        },
     })
 }
 
@@ -418,27 +409,6 @@ fn tmux(cmd: &TmuxCmd) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
-}
-
-fn mint_uuid_v4() -> std::io::Result<SessionId> {
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(SessionId(format_uuid_v4(bytes)))
-}
-
-/// Sets the version (4) and RFC 4122 variant bits, then formats 8-4-4-4-12 lowercase hex.
-fn format_uuid_v4(mut b: [u8; 16]) -> String {
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &h[0..8],
-        &h[8..12],
-        &h[12..16],
-        &h[16..20],
-        &h[20..]
-    )
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<Args> {
@@ -530,60 +500,48 @@ mod tests {
     }
 
     #[test]
-    fn new_session_window_runs_claude_with_session_id_and_optional_name() {
-        let new = |name: Option<&str>| TmuxCmd::NewWindow {
-            cwd: "/w/my repo".into(),
-            config_dir: dir(),
-            session: SessionId("0b6c2f7e-1c1a-4d2b-9a8e-3f4a5b6c7d8e".into()),
-            name: name.map(str::to_owned),
-        };
+    fn new_session_runs_claude_bg_in_the_row_cwd_with_an_optional_name() {
+        let cmd = claude_bg(&dir(), Path::new("/w/my repo"), Some("fix the bug"));
+        assert_eq!(cmd.get_program(), "claude");
         assert_eq!(
-            new(Some("fix the bug")).argv(),
-            [
-                "new-window",
-                "-n",
-                "fix the bug",
-                "-c",
-                "/w/my repo",
-                "-e",
-                "CLAUDE_CONFIG_DIR=/Users/u/.claude-personal",
-                "claude",
-                "--session-id",
-                "0b6c2f7e-1c1a-4d2b-9a8e-3f4a5b6c7d8e",
-                "--name",
-                "fix the bug"
-            ]
+            cmd.get_args().collect::<Vec<_>>(),
+            ["--bg", "--name", "fix the bug"]
         );
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/w/my repo")));
         assert_eq!(
-            new(None).argv(),
-            [
-                "new-window",
-                "-n",
-                "claude",
-                "-c",
-                "/w/my repo",
-                "-e",
-                "CLAUDE_CONFIG_DIR=/Users/u/.claude-personal",
-                "claude",
-                "--session-id",
-                "0b6c2f7e-1c1a-4d2b-9a8e-3f4a5b6c7d8e"
-            ]
+            cmd.get_envs().collect::<Vec<_>>(),
+            [(
+                "CLAUDE_CONFIG_DIR".as_ref(),
+                Some("/Users/u/.claude-personal".as_ref())
+            )]
         );
+        let unnamed = claude_bg(&dir(), Path::new("/w"), None);
+        assert_eq!(unnamed.get_args().collect::<Vec<_>>(), ["--bg"]);
     }
 
     #[test]
-    fn uuid_v4_sets_version_and_variant_bits() {
+    fn the_job_id_comes_from_the_backgrounded_line() {
+        // Captured from Claude Code 2.1.310.
+        let out = "backgrounded · a4bc2210 · agentty bg probe (idle — send a prompt to start)
+  claude agents             list sessions
+  claude attach a4bc2210    open in this terminal
+";
+        assert_eq!(job_from_bg_output(out), Some(JobId("a4bc2210".into())));
+        assert_eq!(job_from_bg_output("backgrounded · --rm · x"), None);
+        assert_eq!(job_from_bg_output(""), None);
+    }
+
+    #[test]
+    fn a_failed_bg_start_flashes_the_last_stderr_line() {
+        let stderr = "warning: something minor
+Workspace not trusted. Run `claude` in /w once and accept the trust prompt, then retry.
+
+";
         assert_eq!(
-            format_uuid_v4([0xff; 16]),
-            "ffffffff-ffff-4fff-bfff-ffffffffffff"
+            bg_failure(stderr),
+            "Workspace not trusted. Run `claude` in /w once and accept the trust prompt, then retry."
         );
-        assert_eq!(
-            format_uuid_v4([0; 16]),
-            "00000000-0000-4000-8000-000000000000"
-        );
-        let a = mint_uuid_v4().unwrap().0;
-        assert_eq!(a.len(), 36);
-        assert_ne!(a, mint_uuid_v4().unwrap().0);
+        assert_eq!(bg_failure(""), "claude --bg printed no job id");
     }
 
     #[test]

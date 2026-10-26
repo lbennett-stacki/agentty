@@ -376,15 +376,15 @@ fn on_outcome(app: &mut App, outcome: Outcome, now: At) -> Vec<Effect> {
     let quit = app.popup.then_some(Effect::Quit);
     match outcome {
         Outcome::Jumped => quit.into_iter().collect(),
-        Outcome::Spawned { session, group } => group
+        Outcome::Spawned { dir, job, group } => group
             .map(|g| {
                 Effect::Commit(Op::SetGroup {
-                    key: UserKey::Session(session),
+                    key: UserKey::Job(job.clone()),
                     group: Some(g),
                 })
             })
             .into_iter()
-            .chain(quit)
+            .chain([Effect::Attach { dir, job }])
             .collect(),
         Outcome::Attached | Outcome::Committed => vec![],
         Outcome::Failed(msg) => {
@@ -1072,7 +1072,7 @@ fn render_help(frame: &mut Frame, body: Rect, snap: &Snapshot) {
         "⏎         jump to the pane, or attach a bg job here (^Z back)",
         "tab p     detail pane     r     label",
         "m         move to group (- automatic)",
-        "n         new claude here (same dir, cwd, group)",
+        "n         new bg claude here, attached (same dir, cwd, group)",
         "/         filter          q esc quit",
         "",
         "▲ needs you  ● working  ◐ parked  ? asked a question  ○ idle  · exited",
@@ -1752,15 +1752,22 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
 
         let spawned = Outcome::Spawned {
-            session: SessionId("u".into()),
+            dir: ConfigDir("/h/.claude".into()),
+            job: JobId("0a1b2c3d".into()),
             group: Some(GroupName("side".into())),
         };
         assert_eq!(
             update(&mut app, &s, &user, Input::Done(spawned), NOW),
-            [Effect::Commit(Op::SetGroup {
-                key: UserKey::Session(SessionId("u".into())),
-                group: Some(GroupName("side".into()))
-            })]
+            [
+                Effect::Commit(Op::SetGroup {
+                    key: UserKey::Job(JobId("0a1b2c3d".into())),
+                    group: Some(GroupName("side".into()))
+                }),
+                Effect::Attach {
+                    dir: ConfigDir("/h/.claude".into()),
+                    job: JobId("0a1b2c3d".into()),
+                }
+            ]
         );
         let mut esc = vec![Key::Char('n')];
         esc.extend(typed("x"));

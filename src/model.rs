@@ -637,7 +637,8 @@ pub enum Outcome {
     Jumped,
     Attached,
     Spawned {
-        session: SessionId,
+        dir: ConfigDir,
+        job: JobId,
         group: Option<GroupName>,
     },
     Committed,

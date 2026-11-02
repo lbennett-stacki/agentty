@@ -23,6 +23,7 @@
     {"id": "1346", "kind": "pr", "href": "https://example.invalid/acme/demo/pull/1346"},
     {"kind": "pr", "href": "https://example.invalid/acme/demo/pull/1347#issuecomment-1"},
     {"id": "1346", "kind": "pr", "href": "https://example.invalid/acme/demo/pull/1346"},
+    {"id": 1348, "kind": "pr"},
     {"id": "f1", "kind": "frame", "href": "https://example.invalid/frame/1"}
   ],
   "tokens": 141053,

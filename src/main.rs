@@ -3,6 +3,7 @@ mod derive;
 mod jobs;
 mod limits;
 mod model;
+mod prs;
 mod registry;
 mod sidecars;
 mod skills;

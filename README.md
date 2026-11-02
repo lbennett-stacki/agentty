@@ -8,13 +8,13 @@ A tmux dashboard that lists every live Claude Code session on this machine and s
  webapp ───────────────────────── 3  │
  ▲ needs you  Fix token refresh race │      now permission prompt · Bash: Run
  ◐ waiting    Rewrite onboarding docs│          migration against staging
-   ├─ ● pstack:poteto-agent  Audit … │   branch feat/auth-race  #4812
+   ├─ ● pstack:poteto-agent  Audit … │   branch feat/auth-race
    ├─ ◉ monitor  Watch CI for PR #4… │  context 412k tokens
    └─ ✓ 4 finished                   │      age 3m ago
  ● working    Splice PR 4790 into a …│  runs as tmux pane
  agentty ──────────────────────── 2  │
- ? your turn  Dashboard design       │      you run the migration on staging
- ○ idle       Fee rounding           │   claude Running it now.
+ ? your turn  Dashboard design       │      prs #4812  #4790
+ ○ idle       Fee rounding           │
  ⏎ open   tab details   l agents   n new   r label   m move   s skills   / filter   ? help
 ```
 
@@ -54,7 +54,9 @@ bind A run-shell 'tmux select-window -t "=agents" 2>/dev/null || tmux new-window
 
 A row's name is your label if you set one (with the title beside it, dim), otherwise Claude Code's `/rename` title, otherwise the session name or the AI title. The selected row has a highlighted background.
 
-The details pane (tab) shows the rest: "now", what the session is doing (the latest tool call and its description, what it is waiting on, or the latest recap), then its branch and pull requests, context, cost, age, how it runs, its background agents, your last prompt and Claude's last reply, open tasks, pending work, folder, config dir and session id. In a terminal 100 columns or wider it sits beside the list. Otherwise it sits below.
+The details pane (tab) shows the rest: "now", what the session is doing (the latest tool call and its description, what it is waiting on, or the latest recap), then its branch, context, cost, age, how it runs, its pull requests, its background agents, your last prompt and Claude's last reply, open tasks, pending work, folder, config dir and session id. In a terminal 100 columns or wider it sits beside the list. Otherwise it sits below.
+
+The pull requests are the ones the session opened or linked (Claude Code's `pr-link` records and a bg job's PR children), shown bold, plus every PR the chat mentions as a link, `owner/repo#N` or `#N`, shown plain. Tool output and skill text don't count. When the PRs span more than one repo, each shows its repo name, as in `web#4812`.
 
 Rows group by your own groups first, then by team, then by git repository (worktrees fold into their main repository).
 
@@ -142,7 +144,7 @@ Claude Code runs the statusline only while a session is on screen, so these valu
 agentty scans `~/.claude` and every `~/.claude-*` directory that has a `sessions/` directory, plus `$CLAUDE_CONFIG_DIR`. In each one it reads:
 
 - `sessions/<pid>.json`, to find live sessions and their status. It checks each pid against `ps` so that stale files and reused pids are ignored.
-- `projects/*/<session>.jsonl` and `subagents/`, to get titles, the current tool call, background work, branch, pull requests, and context tokens. It reads only the last 256 KB to 4 MB of each transcript, then only the bytes appended after that.
+- `projects/*/<session>.jsonl` and `subagents/`, to get titles, the current tool call, background work, branch, context tokens, and pull requests: `pr-link` records, plus PR links and `#N` in assistant text and your messages. It reads only the last 256 KB to 4 MB of each transcript, then only the bytes appended after that.
 - `jobs/<id>/state.json` for bg jobs. agentty does not read the `providerEnv` field, which holds credentials.
 - `tasks/<session>/`, `teams/*/config.json`, and the optional statusline cache.
 - `skills/*`, only for the skills view: each entry's name, where its symlinks lead, and whether its `SKILL.md` matches the other copies.

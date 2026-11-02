@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 
 use crate::model::{At, SafeText, TaskId, TaskOutcome, ToolUseId};
+use crate::prs::{self, PrRef, Prs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileStamp {
@@ -188,7 +189,7 @@ pub struct Facts {
     pub away_summary: Option<SafeText>,
     pub worktree: Option<Worktree>,
     pub branch: Option<SafeText>,
-    pub prs: Vec<u32>,
+    pub prs: Prs,
     pub usage: Option<Usage>,
     pub wakeup: Option<At>,
     pub exit: Option<ExitTotals>,
@@ -438,11 +439,7 @@ impl Facts {
                 self.away_summary = Some(SafeText::redact(s.trim()));
             }
             Event::Worktree(w) => self.worktree = w,
-            Event::PrLink(n) => {
-                if !self.prs.contains(&n) {
-                    self.prs.push(n);
-                }
-            }
+            Event::Pr { r, own } => self.prs.add(r, own),
             Event::CostState(cost_usd) => {
                 self.exit = Some(ExitTotals { cost_usd });
                 self.open_bg.clear();
@@ -563,6 +560,9 @@ struct WireLine {
     #[serde(default, deserialize_with = "present")]
     worktree_session: Option<Option<WireWorktree>>,
     pr_number: Option<u32>,
+    pr_url: Option<String>,
+    pr_repository: Option<String>,
+    is_meta: Option<bool>,
     #[serde(rename = "totalCostUSD")]
     total_cost_usd: Option<f64>,
     bridge_session_id: Option<String>,
@@ -741,7 +741,10 @@ enum Event {
     LastPrompt(String),
     AwaySummary(String),
     Worktree(Option<Worktree>),
-    PrLink(u32),
+    Pr {
+        r: PrRef,
+        own: bool,
+    },
     CostState(f64),
     Bridge(bool),
 }
@@ -802,7 +805,17 @@ fn events(line: &[u8], out: &mut Vec<Event>) -> Result<(), Reject> {
                 })));
             }
         }
-        "pr-link" => out.extend(w.pr_number.map(Event::PrLink)),
+        "pr-link" => {
+            let repo = w
+                .pr_repository
+                .as_deref()
+                .map(SafeText::redact)
+                .or_else(|| PrRef::from_url(w.pr_url.as_deref()?)?.repo);
+            out.extend(w.pr_number.map(|number| Event::Pr {
+                r: PrRef { repo, number },
+                own: true,
+            }));
+        }
         "cost-state" => out.extend(w.total_cost_usd.map(Event::CostState)),
         "bridge-session" => {
             out.push(Event::Bridge(
@@ -846,6 +859,11 @@ fn user_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
         return;
     }
     let text = content.map(WireContent::text).unwrap_or_default();
+    // Meta lines without an origin are skill bodies and injected reminders, whose PR
+    // numbers are examples.
+    if w.is_meta != Some(true) || w.origin.is_some() {
+        mentioned(&text, out);
+    }
     let kind = w.origin.as_ref().and_then(|o| o.kind.as_deref());
     if kind == Some("task-notification") {
         out.push(Event::Notified {
@@ -894,6 +912,7 @@ fn assistant_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
             }
             Some("text") => {
                 let text = b.text.as_deref().unwrap_or("").trim();
+                mentioned(text, out);
                 if !text.is_empty() {
                     let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
                     out.push(Event::Text {
@@ -907,6 +926,14 @@ fn assistant_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
             _ => {}
         }
     }
+}
+
+fn mentioned(text: &str, out: &mut Vec<Event>) {
+    out.extend(
+        prs::mentions(text)
+            .into_iter()
+            .map(|r| Event::Pr { r, own: false }),
+    );
 }
 
 fn system_events(w: &WireLine, at: At, out: &mut Vec<Event>) {
@@ -1610,7 +1637,8 @@ pub(crate) mod tests {
             json!({"type": "worktree-state", "worktreeSession": {"worktreePath": "/w/x", "worktreeName": "x", "worktreeBranch": "worktree-x"}}),
             json!({"type": "pr-link", "prNumber": 42, "prUrl": "u"}),
             json!({"type": "pr-link", "prNumber": 42, "prUrl": "u"}),
-            json!({"type": "pr-link", "prNumber": 43, "prUrl": "v"}),
+            json!({"type": "pr-link", "prNumber": 43, "prUrl": "https://github.com/acme/web/pull/43"}),
+            json!({"type": "pr-link", "prNumber": 44, "prUrl": "v", "prRepository": "acme/api"}),
             json!({"type": "bridge-session", "bridgeSessionId": "cse_abc"}),
             text_from(1, "real", "claude-opus-5-5", 5000),
             text_from(2, "fake", "<synthetic>", 0),
@@ -1625,7 +1653,14 @@ pub(crate) mod tests {
         assert_eq!(f.titles.ai.as_ref().unwrap().as_str(), "Second");
         assert_eq!(f.titles.custom.as_ref().unwrap().as_str(), "Renamed");
         assert_eq!(f.worktree, None);
-        assert_eq!(f.prs, [42, 43]);
+        assert_eq!(
+            f.prs.tuples(),
+            [
+                (None, 42, true),
+                (Some("acme/web"), 43, true),
+                (Some("acme/api"), 44, true)
+            ]
+        );
         assert_eq!(f.usage.as_ref().unwrap().ctx_tokens, 5000);
         assert!(!f.bridge_active);
         assert_eq!(
@@ -1633,6 +1668,42 @@ pub(crate) mod tests {
             "Watching CI for you."
         );
         assert_eq!(f.last_text.as_ref().unwrap().first_line.as_str(), "fake");
+    }
+
+    #[test]
+    fn chat_mentions_add_prs_but_meta_bodies_tool_io_and_results_do_not() {
+        let user = |n: u32, extra: Value| conv(n, "user", extra);
+        let f = fold(&[
+            json!({"type": "pr-link", "prNumber": 42, "prUrl": "https://github.com/acme/web/pull/42"}),
+            human(1, "is #7 related to (#42)?"),
+            text(
+                2,
+                "Looking.\nOpened https://github.com/acme/api/pull/8 and acme/web#9.",
+            ),
+            user(
+                3,
+                json!({"isMeta": true, "origin": {"kind": "peer"}, "message": {"role": "user", "content": "peer: #10 is green"}}),
+            ),
+            user(
+                4,
+                json!({"isMeta": true, "message": {"role": "user", "content": [{"type": "text", "text": "Example: fix #96"}]}}),
+            ),
+            tool_use(5, "t1", "Bash", json!({"description": "gh pr view #98"})),
+            user(
+                6,
+                json!({"message": {"role": "user", "content": [{"tool_use_id": "t1", "type": "tool_result", "content": [{"type": "text", "text": "#99 merged"}]}]}}),
+            ),
+        ]);
+        assert_eq!(
+            f.prs.tuples(),
+            [
+                (Some("acme/web"), 42, true),
+                (None, 7, false),
+                (Some("acme/api"), 8, false),
+                (Some("acme/web"), 9, false),
+                (None, 10, false)
+            ]
+        );
     }
 
     #[test]
@@ -1777,7 +1848,13 @@ pub(crate) mod tests {
             f.last_prompt.as_ref().unwrap().as_str(),
             "Add retry to the fetch helper"
         );
-        assert_eq!(f.prs, [42, 43]);
+        assert_eq!(
+            f.prs.tuples(),
+            [
+                (Some("example/demo"), 42, true),
+                (Some("example/demo"), 43, true)
+            ]
+        );
         assert_eq!(f.worktree.as_ref().unwrap().name.as_str(), "retry");
         assert_eq!(f.branch, Some(SafeText::ours("feat/retry")));
         assert_eq!(f.usage.as_ref().unwrap().ctx_tokens, 6 + 300 + 3100);
@@ -1813,7 +1890,7 @@ pub(crate) mod tests {
         let path = dir.join("s.jsonl");
         fs::copy(Path::new(FIXTURES).join("transcript/session.jsonl"), &path).unwrap();
         let mut t = Transcript::open(path.clone(), Window::Main).unwrap();
-        assert_eq!(t.facts().prs, [42, 43]);
+        assert_eq!(t.facts().prs.tuples().len(), 2);
         fs::remove_file(&path).unwrap();
         fs::write(
             &path,

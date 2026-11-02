@@ -35,7 +35,9 @@ Show every live Claude Code session in one grouped list with a status that tells
  ⏎ open   tab details   l agents   n new   r label   m move   s skills   / filter   ? help
 ```
 
-The list holds only status and name. The details pane (tab) carries the now-line, branch and PRs, context, cost, age, how the session runs, its background agents, the last prompt and reply, open tasks, pending work and ids.
+The list holds only status and name. The details pane (tab) carries the now-line, branch, context, cost, age, how the session runs, its PRs, its background agents, the last prompt and reply, open tasks, pending work and ids.
+
+PRs come from three places, merged into one ordered `Prs`: `pr-link` records and bg job `kind: "pr"` children (the session's own, shown bold), and PR links, `owner/repo#N` and bare `#N` in the chat (plain). The chat is assistant text and user messages, minus tool results and `isMeta` lines without an `origin`, which are skill bodies and reminders full of example numbers. Two refs are one PR when their numbers match and their repos match or one is unknown. Tokens show `repo#N` only when the PRs span more than one repo.
 
 Glyphs and words: `▲` needs you (red); `?` your turn (yellow), Idle where the last turn ended on a question (a heuristic, so it stays in the Idle rank and only sorts first within it); `●` working (green); `◐` waiting, the Parked status (cyan); `○` idle; `·` ended, an Exited job (dim). The details pane names Remote Control and the config-dir tag (`personal`; the default `~/.claude` has none). Context shows `NN%` only when the statusline tee exists, otherwise absolute tokens. Cost shows only from an authoritative source (the statusline tee, or `cost-state` on exit). `1+ shell` appears when the registry says `shell` but the launch predates our tail window.
 
@@ -47,7 +49,7 @@ Popup flow (`bind a display-popup -E -w 90% -h 85% -T ' agents ' 'agentty --popu
 
 ### Module map
 
-Twelve flat files plus the skills view, a child of `ui`. Input reaches pixels in at most three hops.
+Fifteen flat files plus the skills view, a child of `ui`. Input reaches pixels in at most three hops.
 
 | module | owns | yields |
 |---|---|---|
@@ -55,6 +57,7 @@ Twelve flat files plus the skills view, a child of `ui`. Input reaches pixels in
 | `registry` | `sessions/<pid>.json`, `ps` output parsing, config-dir discovery | `RegEntry`, `parse_ps` |
 | `jobs` | `jobs/<id>/state.json` | `Job`, `FanItem` (no `providerEnv` field exists) |
 | `transcript` | main and sidecar JSONL: cursor, window policy, reducer | `Transcript`, `Facts`, `Notice` |
+| `prs` | PR references: link parsing, `#N` and `owner/repo#N` in chat text, the merge rule | `PrRef`, `Prs` |
 | `subagents` | `subagents/` metas, sidecar cursors, the agent-state rule | `AgentMeta`, `Subagents`, `agent_state -> NodeState` |
 | `sidecars` | tasks, statusline tee, team configs, repo roots | `Task`, `Statusline`, `Team`, `repo_root` |
 | `world` | every cursor and cache; stat-gated refresh; `Host`; GC | `SessionView`s, `ExitedView`s, `Diagnostic`s |
@@ -238,6 +241,8 @@ Fixtures live in `tests/fixtures/`. They are cut from live files named in GROUND
 | `Facts::apply_line`: tail | sidecar ending in assistant text → `tail_looks_finished`; a later tool_use clears it; a handback sets it | an agent shown Running forever with no notice |
 | `Facts::apply_line`: secrets | a Bash tool_use whose `command` holds the sentinel | the command reaching `Facts` at all |
 | `Facts::apply_line`: metadata | two `ai-title`s, a `custom-title`, a `worktree-state` then `worktreeSession:null`, three `pr-link`s with a duplicate, `<synthetic>` usage after a real one | stale title wins; a left worktree shown; duplicate PRs; context reset to 0 |
+| `Facts::apply_line`: PR mentions | `#N` in a human prompt, a multi-line assistant text, a peer `isMeta` line; also in an `isMeta` skill body, a tool_use input and a tool_result | example or tool-output numbers shown as PRs; a mention demoting an own PR |
+| `prs::mentions`, `Prs::add` | each bare-`#N` accept and reject case, links with fragments, shorthand; bare-then-link, link-then-bare, two repos with one number | `&#123;`, `page#3` or a URL fragment read as a PR; one PR listed twice |
 | `Transcript::pump` split invariance | append the fixture in chunks of 1, 7, 4096 and 39 000 bytes; compare `Facts` with one read | partial-line holdback bugs |
 | `Transcript::pump` replacement | truncate, then rewrite the file (new inode) | a cursor reading past EOF |
 | `window_start` | a 2 MB synthetic file with the last `last-prompt` 300 KB from EOF; a file whose final 300 KB is one line | a missing title on the first frame; an infinite grow loop |

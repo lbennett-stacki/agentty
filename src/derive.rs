@@ -8,6 +8,7 @@ use crate::model::{
     Problem, Row, RowKey, SafeText, Snapshot, Status, TaskId, TaskOutcome, Tree, UserKey,
     WaitingFor, Window,
 };
+use crate::prs::Prs;
 use crate::registry::{Name, NameSource, ProcKind, RegEntry, RegStatus};
 use crate::sidecars::{Statusline, Task, TaskStatus, Team};
 use crate::subagents::{AgentMeta, Subagents};
@@ -760,12 +761,10 @@ fn worktree(facts: Option<&Facts>, job: Option<&Job>) -> Option<SafeText> {
         })
 }
 
-fn prs(facts: Option<&Facts>, job: Option<&Job>) -> Vec<u32> {
-    let mut out: Vec<u32> = facts.map(|f| f.prs.clone()).unwrap_or_default();
-    for pr in job.map(|j| j.prs.as_slice()).unwrap_or_default() {
-        if !out.contains(pr) {
-            out.push(*pr);
-        }
+fn prs(facts: Option<&Facts>, job: Option<&Job>) -> Prs {
+    let mut out = facts.map(|f| f.prs.clone()).unwrap_or_default();
+    if let Some(j) = job {
+        out.extend(&j.prs);
     }
     out
 }
@@ -889,6 +888,7 @@ mod tests {
 
     use super::*;
     use crate::model::{JobId, PaneId, Pid, ProcStart, SessionId, ToolUseId};
+    use crate::prs::PrRef;
     use crate::sidecars::TeamMember;
     use crate::transcript::{BgItem, ExitTotals, Horizon, TextBlock, Titles, ToolCall, Usage};
 
@@ -942,7 +942,7 @@ mod tests {
             worktree_branch: None,
             name: None,
             remote_control: false,
-            prs: Vec::new(),
+            prs: Prs::default(),
             updated_at: None,
             ended_at: None,
         }
@@ -1882,17 +1882,33 @@ mod tests {
 
     #[test]
     fn meta_merges_prs_falls_back_for_branch_and_flags_remote_control_and_dir() {
-        let mut fx = Fx::new(bg_reg(RegStatus::Idle)).with_facts(|f| f.prs = vec![4790, 4812]);
+        let mut fx = Fx::new(bg_reg(RegStatus::Idle)).with_facts(|f| {
+            f.prs.add(PrRef::bare(4790), true);
+            f.prs.add(PrRef::bare(4812), false);
+        });
         fx.dir = ConfigDir(PathBuf::from("/home/u/.claude-personal"));
+        let mut job_prs = Prs::default();
+        job_prs.add(
+            PrRef::from_url("https://github.com/acme/web/pull/4812").unwrap(),
+            true,
+        );
+        job_prs.add(PrRef::bare(4900), true);
         fx.job = Some(Job {
-            prs: vec![4812, 4900],
+            prs: job_prs,
             worktree_branch: Some(SafeText::ours("docs/onboarding")),
             worktree_path: Some(PathBuf::from("/work/repo/.claude/worktrees/docs")),
             remote_control: true,
             ..job()
         });
         let m = meta(&fx.view());
-        assert_eq!(m.prs, [4790, 4812, 4900]);
+        assert_eq!(
+            m.prs.tuples(),
+            [
+                (None, 4790, true),
+                (Some("acme/web"), 4812, true),
+                (None, 4900, true)
+            ]
+        );
         assert_eq!(m.branch, Some(SafeText::ours("docs/onboarding")));
         assert_eq!(m.worktree, Some(SafeText::ours("docs")));
         assert!(m.remote_control && m.bg);

@@ -13,10 +13,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::config::{Config, Workspace};
 use crate::derive::roomiest;
 use crate::model::{
-    At, AutoGroup, ConfigDir, Cost, Ctx, Effect, GroupId, GroupName, Meta, NodeKind, NodeState, Op,
+    At, AutoGroup, ConfigDir, Cost, Ctx, Effect, GroupId, GroupName, NodeKind, NodeState, Op,
     OpenTarget, Outcome, Problem, Rank, Row, RowKey, SafeText, Snapshot, Status, TaskId, Tree,
     UserKey, Window, row_order,
 };
+use crate::prs::Prs;
 use crate::skills::Inventory;
 use crate::user_state::UserState;
 
@@ -1257,14 +1258,47 @@ fn kind_name(kind: &NodeKind) -> &str {
     }
 }
 
-/// Where the session works: branch or worktree, then its PRs.
-fn place(meta: &Meta) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(b) = meta.branch.as_ref().or(meta.worktree.as_ref()) {
-        parts.push(b.as_str().to_owned());
+/// `#N` per PR, bold when the session opened or linked it. Repo names show only when the
+/// PRs span repos.
+fn pr_tokens(prs: &Prs) -> Vec<Span<'static>> {
+    let repos: HashSet<&str> = prs
+        .iter()
+        .filter_map(|p| p.r.repo.as_ref().map(SafeText::as_str))
+        .collect();
+    prs.iter()
+        .map(|p| {
+            let text = match p.r.repo_name() {
+                Some(name) if repos.len() > 1 => format!("{name}#{}", p.r.number),
+                _ => format!("#{}", p.r.number),
+            };
+            let style = if p.own {
+                Style::new().add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+            };
+            Span::styled(text, style)
+        })
+        .collect()
+}
+
+/// Packs `spans` greedily into lines `width` columns wide, two spaces apart.
+fn pack(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+    let mut out: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut used = 0;
+    for s in spans {
+        let w = s.width();
+        match out.last_mut() {
+            Some(line) if used + 2 + w <= width => {
+                line.extend([Span::raw("  "), s]);
+                used += 2 + w;
+            }
+            _ => {
+                used = w;
+                out.push(vec![s]);
+            }
+        }
     }
-    parts.extend(meta.prs.iter().map(|pr| format!("#{pr}")));
-    parts.join("  ")
+    out
 }
 
 /// A bar `cells` wide filled to `pct`. Only a nearly full context gets colour.
@@ -1389,9 +1423,8 @@ fn render_detail(
 
     para(&mut out, "now", row.now.as_str(), Style::new());
     let meta = &row.meta;
-    let place = place(meta);
-    if !place.is_empty() {
-        fact(&mut out, "branch", vec![Span::raw(place)]);
+    if let Some(b) = meta.branch.as_ref().or(meta.worktree.as_ref()) {
+        fact(&mut out, "branch", vec![Span::raw(b.as_str().to_owned())]);
     }
     if let Some(ctx) = meta.ctx {
         fact(&mut out, "context", context(ctx));
@@ -1416,6 +1449,13 @@ fn render_detail(
         runs.push_str(", remote control on");
     }
     fact(&mut out, "runs as", vec![Span::raw(runs)]);
+
+    if !meta.prs.is_empty() {
+        out.push(TLine::raw(""));
+    }
+    for (i, line) in pack(pr_tokens(&meta.prs), text_w).into_iter().enumerate() {
+        fact(&mut out, if i == 0 { "prs" } else { "" }, line);
+    }
 
     let tree = &row.tree;
     if !tree.is_empty() {
@@ -1743,9 +1783,10 @@ mod tests {
     use crate::config::Account;
     use crate::model::Limits;
     use crate::model::{
-        Count, Detail, DiagSource, Diagnostic, JobId, JobOutcome, Need, Node, PaneId, Parked, Pid,
-        ProcStart, SessionId, TaskOutcome, WaitingFor,
+        Count, Detail, DiagSource, Diagnostic, JobId, JobOutcome, Meta, Need, Node, PaneId, Parked,
+        Pid, ProcStart, SessionId, TaskOutcome, WaitingFor,
     };
+    use crate::prs::PrRef;
     use crate::skills::Cell;
 
     const NOW: At = At(1_000_000_000);
@@ -2768,6 +2809,35 @@ mod tests {
     }
 
     #[test]
+    fn pr_tokens_name_the_repo_only_when_prs_span_repos() {
+        let text = |urls: &[&str]| {
+            let mut prs = Prs::default();
+            for u in urls {
+                prs.add(PrRef::from_url(u).unwrap(), false);
+            }
+            pr_tokens(&prs)
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            text(&[
+                "https://github.com/acme/web/pull/12",
+                "https://x.example/pull/5"
+            ]),
+            ["#12", "#5"]
+        );
+        assert_eq!(
+            text(&[
+                "https://github.com/acme/web/pull/12",
+                "https://github.com/acme/api/pull/3",
+                "https://x.example/pull/5"
+            ]),
+            ["web#12", "api#3", "#5"]
+        );
+    }
+
+    #[test]
     fn elapsed_formats_each_unit_boundary() {
         let at = |s: i64| elapsed(At(NOW.0 - s * 1000), NOW);
         assert_eq!(
@@ -2788,9 +2858,14 @@ mod tests {
             repo("jnj-web"),
         );
         needs.now = SafeText::ours("permission prompt · Bash");
+        let mut prs = Prs::default();
+        prs.add(PrRef::bare(4812), true);
+        for n in 4000..4012 {
+            prs.add(PrRef::bare(n), false);
+        }
         needs.meta = Meta {
             branch: Some(SafeText::ours("feat/auth-race")),
-            prs: vec![4812],
+            prs,
             ctx: Some(Ctx::Tokens(412_000)),
             ..Meta::default()
         };
@@ -2848,16 +2923,48 @@ mod tests {
         assert!(lines[29].starts_with(" ⏎ open   tab details"), "{text}");
 
         app.detail = true;
-        let text = buffer_text(&draw(&app));
+        let buf = draw(&app);
+        let text = buffer_text(&buf);
         for fact in [
             "▲ needs you",
             "     now permission prompt · Bash",
-            "  branch feat/auth-race  #4812",
             " context 412k tokens",
             "     age 3m ago",
         ] {
             assert!(text.contains(fact), "{fact:?} missing from\n{text}");
         }
+        let pane: Vec<&str> = text
+            .lines()
+            .map(|l| l.split_once('│').map_or("", |(_, d)| d.trim_end()))
+            .collect();
+        let at = |line: &str| pane.iter().position(|l| *l == line);
+        let branch = at("   branch feat/auth-race").expect(&text);
+        let prs = at("      prs #4812  #4000  #4001  #4002  #4003").expect(&text);
+        assert_eq!(pane[prs - 1], "", "a blank line precedes prs\n{text}");
+        assert!(branch < prs && pane[branch + 1..prs].iter().any(|l| l.contains("runs as")));
+        assert_eq!(
+            pane[prs + 1],
+            "          #4004  #4005  #4006  #4007  #4008",
+            "{text}"
+        );
+        let col = |token: &str| {
+            (text
+                .lines()
+                .nth(prs)
+                .unwrap()
+                .split(token)
+                .next()
+                .unwrap()
+                .chars()
+                .count()) as u16
+        };
+        let bold = |token: &str| {
+            buf[(col(token), prs as u16)]
+                .modifier
+                .contains(Modifier::BOLD)
+        };
+        assert!(bold("#4812"), "own PRs are bold");
+        assert!(!bold("#4000"), "mentions are plain");
 
         app.mode = Mode::Help;
         let text = buffer_text(&draw(&app));

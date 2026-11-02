@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::model::{At, ConfigDir, JobId, Problem, SafeText, SessionId, nonempty};
+use crate::prs::{PrRef, Prs};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Job {
@@ -18,7 +19,7 @@ pub struct Job {
     pub worktree_branch: Option<SafeText>,
     pub name: Option<String>,
     pub remote_control: bool,
-    pub prs: Vec<u32>,
+    pub prs: Prs,
     pub updated_at: Option<At>,
     pub ended_at: Option<At>,
 }
@@ -104,17 +105,15 @@ struct WireChild {
 pub fn parse(id: JobId, bytes: &[u8]) -> Result<Job, Problem> {
     let w: WireJob = serde_json::from_slice(bytes).map_err(|_| Problem::Unparsable)?;
     let updated_at = w.updated_at.as_deref().and_then(At::parse_iso);
-    let mut prs: Vec<u32> = Vec::new();
-    for n in w
+    let mut prs = Prs::default();
+    for r in w
         .children
         .iter()
         .flatten()
         .filter(|c| c.kind.as_deref() == Some("pr"))
-        .filter_map(pr_number)
+        .filter_map(pr_ref)
     {
-        if !prs.contains(&n) {
-            prs.push(n);
-        }
+        prs.add(r, true);
     }
     Ok(Job {
         id,
@@ -162,23 +161,16 @@ fn question(needs: &serde_json::Value) -> Option<&str> {
     (!q.trim().is_empty()).then_some(q)
 }
 
-fn pr_number(child: &WireChild) -> Option<u32> {
+fn pr_ref(child: &WireChild) -> Option<PrRef> {
     let from_id = || match child.id.as_ref()? {
         serde_json::Value::String(s) => s.parse().ok(),
         n => n.as_u64()?.try_into().ok(),
     };
-    let from_href = || {
-        child
-            .href
-            .as_deref()?
-            .rsplit_once("/pull/")?
-            .1
-            .split(['/', '#', '?'])
-            .next()?
-            .parse()
-            .ok()
-    };
-    from_id().or_else(from_href)
+    child
+        .href
+        .as_deref()
+        .and_then(PrRef::from_url)
+        .or_else(|| from_id().map(PrRef::bare))
 }
 
 fn fan_item(w: WireFan) -> FanItem {
@@ -265,7 +257,14 @@ mod tests {
             Some("Fee logic done; client side next")
         );
         assert_eq!(job.needs, None);
-        assert_eq!(job.prs, [1346, 1347]);
+        assert_eq!(
+            job.prs.tuples(),
+            [
+                (Some("acme/demo"), 1346, true),
+                (Some("acme/demo"), 1347, true),
+                (None, 1348, true)
+            ]
+        );
         assert!(!job.remote_control);
         assert_eq!(job.updated_at, At::parse_iso("2026-10-04T10:15:30.500Z"));
         assert_eq!(

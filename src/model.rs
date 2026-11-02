@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::prs::Prs;
 use crate::skills::Inventory;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -536,7 +537,7 @@ impl Row {
 pub struct Meta {
     pub branch: Option<SafeText>,
     pub worktree: Option<SafeText>,
-    pub prs: Vec<u32>,
+    pub prs: Prs,
     pub ctx: Option<Ctx>,
     pub cost: Option<Cost>,
     pub remote_control: bool,

@@ -82,7 +82,7 @@ Rows group by your own groups first, then by team, then by git repository (workt
 
 ## Closing a session
 
-`x` (or Ctrl+X) on a bg job asks first, then runs `claude rm <job>`, the command behind Ctrl+X in `claude agents`. It stops the session along with its background agents, shells and monitors, deletes its job state, and removes its worktree. The transcript stays, so `claude --resume` can still open the conversation. `x` also clears an ended job from the finished group. It cannot close an interactive session, because that session belongs to the terminal it runs in, so exit it there.
+`x` (or Ctrl+X) on a bg job asks first, then runs `claude rm <job>`, the command behind Ctrl+X in `claude agents`. It stops the session along with its background agents, shells and monitors, deletes its job state, and removes its worktree. The transcript stays, so `claude --resume` can still open the conversation. `claude rm` runs in the background, so the list stays usable: the row shows `× deleting…` until it finishes, then leaves the list, and a failure shows in the footer. `x` also clears an ended job from the finished group. It cannot close an interactive session, because that session belongs to the terminal it runs in, so exit it there.
 
 `claude rm` will not delete a worktree that could hold work you would lose. The session stops and stays in the list as ended, and agentty shows why it was kept:
 

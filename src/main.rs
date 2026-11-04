@@ -34,6 +34,8 @@ use world::{ReadBudget, RealHost, Roots, Wake, World};
 enum Msg {
     Term(Event),
     Doorbell,
+    /// An effect that ran off the UI thread finished.
+    Done(Outcome),
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -183,12 +185,35 @@ fn run(
                 }
                 Msg::Term(Event::Key(k)) => {
                     if let Some(key) = ui::key_of(&k)
-                        && dispatch(app, &snap, store, screen, ui::Input::Key(key), world.now())
+                        && dispatch(
+                            app,
+                            &snap,
+                            store,
+                            screen,
+                            &tx,
+                            ui::Input::Key(key),
+                            world.now(),
+                        )
                     {
                         return Ok(());
                     }
                 }
                 Msg::Term(_) => {}
+                Msg::Done(outcome) => {
+                    if dispatch(
+                        app,
+                        &snap,
+                        store,
+                        screen,
+                        &tx,
+                        ui::Input::Done(outcome),
+                        world.now(),
+                    ) {
+                        return Ok(());
+                    }
+                    // Refresh now, so a closed job leaves the list on this frame.
+                    next_tick = Instant::now();
+                }
             }
         }
 
@@ -244,14 +269,16 @@ fn dispatch(
     snap: &Snapshot,
     store: &mut user_state::Store,
     screen: &mut Screen,
+    tx: &mpsc::Sender<Msg>,
     input: ui::Input,
     now: model::At,
 ) -> bool {
     let mut queue: VecDeque<Effect> = ui::update(app, snap, store.state(), input, now).into();
     while let Some(effect) = queue.pop_front() {
-        match execute(effect, store, screen) {
-            None => return true,
-            Some(outcome) => {
+        match execute(effect, store, screen, tx) {
+            Step::Quit => return true,
+            Step::Pending => {}
+            Step::Done(outcome) => {
                 queue.extend(ui::update(
                     app,
                     snap,
@@ -346,17 +373,18 @@ fn claude_rm(close: &Close) -> Command {
 /// ```
 fn rm_outcome(close: Close, ok: bool, stdout: &str, stderr: &str) -> Outcome {
     if ok {
-        return Outcome::Closed(close.name);
+        return Outcome::Closed(close);
     }
     let mut lines = stdout.lines();
     if !lines
         .next()
         .is_some_and(|l| l.starts_with(&format!("kept {} ", close.job.0)))
     {
-        return Outcome::Failed(last_line(stderr).map_or_else(
+        let msg = last_line(stderr).map_or_else(
             || format!("claude rm {} failed", close.job.0),
             |l| SafeText::redact(l).as_str().to_owned(),
-        ));
+        );
+        return Outcome::CloseFailed { close, msg };
     }
     let what = lines.next().map(str::trim).unwrap_or_default();
     let next = lines.next().map(str::trim).unwrap_or_default();
@@ -464,10 +492,43 @@ impl InputGate {
     }
 }
 
-fn execute(effect: Effect, store: &mut user_state::Store, screen: &mut Screen) -> Option<Outcome> {
+/// What running an effect led to.
+enum Step {
+    Quit,
+    Done(Outcome),
+    /// Running off the UI thread; its outcome comes back as `Msg::Done`.
+    Pending,
+}
+
+/// Runs `claude rm` on its own thread: removing a worktree can take seconds, and the list keeps
+/// going meanwhile, showing the session as deleting.
+fn spawn_close(close: Close, tx: mpsc::Sender<Msg>) {
+    std::thread::spawn(move || {
+        let outcome = match claude_rm(&close).output() {
+            Err(e) => Outcome::CloseFailed {
+                close,
+                msg: format!("could not run claude rm: {e}"),
+            },
+            Ok(out) => rm_outcome(
+                close,
+                out.status.success(),
+                &String::from_utf8_lossy(&out.stdout),
+                &String::from_utf8_lossy(&out.stderr),
+            ),
+        };
+        let _ = tx.send(Msg::Done(outcome));
+    });
+}
+
+fn execute(
+    effect: Effect,
+    store: &mut user_state::Store,
+    screen: &mut Screen,
+    tx: &mpsc::Sender<Msg>,
+) -> Step {
     let failed = |what: &str| Outcome::Failed(what.to_owned());
-    Some(match effect {
-        Effect::Quit => return None,
+    Step::Done(match effect {
+        Effect::Quit => return Step::Quit,
         Effect::Commit(op) => match store.commit(&op) {
             Ok(()) => Outcome::Committed,
             Err(e) => Outcome::Failed(format!("could not save state: {e}")),
@@ -485,15 +546,10 @@ fn execute(effect: Effect, store: &mut user_state::Store, screen: &mut Screen) -
                 None => Outcome::Failed(bg_failure(&String::from_utf8_lossy(&out.stderr))),
             },
         },
-        Effect::Close(close) => match claude_rm(&close).output() {
-            Err(e) => Outcome::Failed(format!("could not run claude rm: {e}")),
-            Ok(out) => rm_outcome(
-                close,
-                out.status.success(),
-                &String::from_utf8_lossy(&out.stdout),
-                &String::from_utf8_lossy(&out.stderr),
-            ),
-        },
+        Effect::Close(close) => {
+            spawn_close(close, tx.clone());
+            return Step::Pending;
+        }
         Effect::ScanSkills(accounts) => Outcome::Skills(skills::scan(&accounts)),
         Effect::Attach { dir, job } => match screen.hand_over(&mut claude_attach(&dir, &job)) {
             Ok(status) if status.success() => Outcome::Attached,
@@ -705,7 +761,7 @@ Workspace not trusted. Run `claude` in /w once and accept the trust prompt, then
         let out = "removed 35d08c15\n  worktree: “/w/.claude/worktrees/x”\n";
         assert_eq!(
             rm_outcome(close(&[]), true, out, ""),
-            Outcome::Closed("probe".into())
+            Outcome::Closed(close(&[]))
         );
     }
 
@@ -775,13 +831,17 @@ Workspace not trusted. Run `claude` in /w once and accept the trust prompt, then
                 "",
                 "couldn't remove 35d08c15 — the background service may be restarting. Try again in a moment.\n"
             ),
-            Outcome::Failed(
-                "couldn't remove 35d08c15 — the background service may be restarting. Try again in a moment.".into()
-            )
+            Outcome::CloseFailed {
+                close: close(&[]),
+                msg: "couldn't remove 35d08c15 — the background service may be restarting. Try again in a moment.".into()
+            }
         );
         assert_eq!(
             rm_outcome(close(&[]), false, "", ""),
-            Outcome::Failed("claude rm 35d08c15 failed".into())
+            Outcome::CloseFailed {
+                close: close(&[]),
+                msg: "claude rm 35d08c15 failed".into()
+            }
         );
     }
 

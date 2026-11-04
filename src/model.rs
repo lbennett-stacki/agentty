@@ -686,7 +686,8 @@ pub enum Effect {
         name: Option<String>,
         prompt: Option<String>,
     },
-    /// `claude rm`, which Claude Code's agent view runs on ctrl+x.
+    /// `claude rm`, which Claude Code's agent view runs on ctrl+x. It runs in the background and
+    /// reports back as `Outcome::Closed`, `Outcome::Kept` or `Outcome::CloseFailed`.
     Close(Close),
     ScanSkills(Vec<ConfigDir>),
     Commit(Op),
@@ -716,13 +717,19 @@ pub enum Outcome {
     },
     Committed,
     Skills(Inventory),
-    Closed(String),
+    /// `claude rm` removed the job. Like `Kept` and `CloseFailed`, it arrives after the UI has
+    /// moved on, since `claude rm` runs off the UI thread.
+    Closed(Close),
     /// `claude rm` stopped the job but kept it, because removing its worktree could lose work.
     /// `close.discard` holds the arguments that override the refusal, when Claude Code offers one.
     Kept {
         close: Close,
         what: String,
         next: String,
+    },
+    CloseFailed {
+        close: Close,
+        msg: String,
     },
     Failed(String),
 }

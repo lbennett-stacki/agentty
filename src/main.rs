@@ -26,8 +26,8 @@ use ratatui::crossterm::{execute, terminal};
 
 use config::Config;
 use model::{
-    ConfigDir, DiagSource, Diagnostic, Effect, JobId, Outcome, PaneId, Problem, Row, SafeText,
-    Snapshot,
+    Close, ConfigDir, DiagSource, Diagnostic, Effect, JobId, Outcome, PaneId, Problem, Row,
+    SafeText, Snapshot,
 };
 use world::{ReadBudget, RealHost, Roots, Wake, World};
 
@@ -315,14 +315,9 @@ fn job_from_bg_output(stdout: &str) -> Option<JobId> {
 }
 
 fn bg_failure(stderr: &str) -> String {
-    stderr
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map_or("claude --bg printed no job id".into(), |l| {
-            SafeText::redact(l).as_str().to_owned()
-        })
+    last_line(stderr).map_or("claude --bg printed no job id".into(), |l| {
+        SafeText::redact(l).as_str().to_owned()
+    })
 }
 
 fn claude_attach(dir: &ConfigDir, job: &JobId) -> Command {
@@ -330,6 +325,75 @@ fn claude_attach(dir: &ConfigDir, job: &JobId) -> Command {
     cmd.args(["attach", &job.0])
         .env("CLAUDE_CONFIG_DIR", &dir.0);
     cmd
+}
+
+fn claude_rm(close: &Close) -> Command {
+    let mut cmd = Command::new("claude");
+    cmd.args(["rm", &close.job.0])
+        .args(&close.discard)
+        .env("CLAUDE_CONFIG_DIR", &close.dir.0)
+        .stdin(Stdio::null());
+    cmd
+}
+
+/// Reads what `claude rm` did. It prints `removed <id>` on success. When removing the worktree
+/// could lose work it exits 1 and prints, from Claude Code 2.1.318:
+///
+/// ```text
+/// kept <id> — its worktree is still at “<path>”
+///   <what would be lost, and why>
+///   <what to do next, ending in `claude rm <id> <override>` when Claude Code offers one>
+/// ```
+fn rm_outcome(close: Close, ok: bool, stdout: &str, stderr: &str) -> Outcome {
+    if ok {
+        return Outcome::Closed(close.name);
+    }
+    let mut lines = stdout.lines();
+    if !lines
+        .next()
+        .is_some_and(|l| l.starts_with(&format!("kept {} ", close.job.0)))
+    {
+        return Outcome::Failed(last_line(stderr).map_or_else(
+            || format!("claude rm {} failed", close.job.0),
+            |l| SafeText::redact(l).as_str().to_owned(),
+        ));
+    }
+    let what = lines.next().map(str::trim).unwrap_or_default();
+    let next = lines.next().map(str::trim).unwrap_or_default();
+    let again = format!("run 'claude rm {}' again", close.job.0);
+    let (next, discard) = match next.rsplit_once(&format!("claude rm {} ", close.job.0)) {
+        Some((before, args)) => match override_args(args) {
+            Some(args) => (before.trim_end_matches([' ', ':']), args),
+            None => (next, Vec::new()),
+        },
+        None => (next, Vec::new()),
+    };
+    Outcome::Kept {
+        what: SafeText::redact(what).as_str().to_owned(),
+        next: SafeText::redact(&next.replace(&again, "press x again"))
+            .as_str()
+            .to_owned(),
+        close: Close { discard, ..close },
+    }
+}
+
+/// The override `claude rm` offered, if it is only the flags agentty knows to pass back.
+fn override_args(args: &str) -> Option<Vec<String>> {
+    let args: Vec<String> = args.split_whitespace().map(str::to_owned).collect();
+    let known = args.chunks(2).all(|pair| match pair {
+        [flag, value] => {
+            matches!(
+                flag.as_str(),
+                "--discard-unpushed" | "--force-remove-worktree"
+            ) && value.chars().all(|c| c.is_ascii_hexdigit() || c == '@')
+        }
+        _ => false,
+    });
+    (known && !args.is_empty()).then_some(args)
+}
+
+fn last_line(text: &str) -> Option<&str> {
+    text.lines().rev().map(str::trim).find(|l| !l.is_empty())
 }
 
 /// The terminal, and the gate that keeps the input thread off it while a child owns it.
@@ -420,6 +484,15 @@ fn execute(effect: Effect, store: &mut user_state::Store, screen: &mut Screen) -
                 Some(job) => Outcome::Spawned { dir, job, group },
                 None => Outcome::Failed(bg_failure(&String::from_utf8_lossy(&out.stderr))),
             },
+        },
+        Effect::Close(close) => match claude_rm(&close).output() {
+            Err(e) => Outcome::Failed(format!("could not run claude rm: {e}")),
+            Ok(out) => rm_outcome(
+                close,
+                out.status.success(),
+                &String::from_utf8_lossy(&out.stdout),
+                &String::from_utf8_lossy(&out.stderr),
+            ),
         },
         Effect::ScanSkills(accounts) => Outcome::Skills(skills::scan(&accounts)),
         Effect::Attach { dir, job } => match screen.hand_over(&mut claude_attach(&dir, &job)) {
@@ -600,6 +673,116 @@ Workspace not trusted. Run `claude` in /w once and accept the trust prompt, then
             "Workspace not trusted. Run `claude` in /w once and accept the trust prompt, then retry."
         );
         assert_eq!(bg_failure(""), "claude --bg printed no job id");
+    }
+
+    fn close(discard: &[&str]) -> Close {
+        Close {
+            dir: dir(),
+            job: JobId("35d08c15".into()),
+            name: "probe".into(),
+            discard: discard.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn close_runs_claude_rm_with_any_override_under_the_job_config_dir() {
+        let cmd = claude_rm(&close(&["--discard-unpushed", "c688@a2ea"]));
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            ["rm", "35d08c15", "--discard-unpushed", "c688@a2ea"]
+        );
+        assert_eq!(
+            cmd.get_envs().collect::<Vec<_>>(),
+            [(
+                "CLAUDE_CONFIG_DIR".as_ref(),
+                Some("/Users/u/.claude-personal".as_ref())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_removed_job_is_closed() {
+        let out = "removed 35d08c15\n  worktree: “/w/.claude/worktrees/x”\n";
+        assert_eq!(
+            rm_outcome(close(&[]), true, out, ""),
+            Outcome::Closed("probe".into())
+        );
+    }
+
+    #[test]
+    fn unpushed_commits_keep_the_job_and_offer_the_discard_override() {
+        // Captured from Claude Code 2.1.318.
+        let out = "kept 35d08c15 — its worktree is still at “/w/.claude/worktrees/rm-probe3”
+  1 unpushed commit on “worktree-rm-probe3”: c68801b “probe”. It exists on no remote, so deleting the worktree would lose it.
+  push it and run 'claude rm 35d08c15' again, or discard the worktree and its commits: claude rm 35d08c15 --discard-unpushed c68801bb43c860b3cdda55ad15d588fdce39a4ca@a2ea4e823a17f963b8a599de69d8a400
+";
+        assert_eq!(
+            rm_outcome(close(&[]), false, out, ""),
+            Outcome::Kept {
+                close: close(&[
+                    "--discard-unpushed",
+                    "c68801bb43c860b3cdda55ad15d588fdce39a4ca@a2ea4e823a17f963b8a599de69d8a400"
+                ]),
+                what: "1 unpushed commit on “worktree-rm-probe3”: c68801b “probe”. It exists on no remote, so deleting the worktree would lose it.".into(),
+                next: "push it and press x again, or discard the worktree and its commits".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_refusal_without_an_override_says_what_to_do() {
+        let out = "kept 35d08c15 — its worktree is still at “/w/x”
+  The worktree has uncommitted changes. Deleting it would lose them.
+  commit or stash them and run 'claude rm 35d08c15' again, or delete the session from 'claude agents' (ctrl+x twice) to discard them
+";
+        let Outcome::Kept { close: c, next, .. } = rm_outcome(close(&[]), false, out, "") else {
+            panic!("not kept");
+        };
+        assert!(c.discard.is_empty());
+        assert_eq!(
+            next,
+            "commit or stash them and press x again, or delete the session from 'claude agents' (ctrl+x twice) to discard them"
+        );
+    }
+
+    #[test]
+    fn only_known_override_flags_are_passed_back() {
+        assert_eq!(
+            override_args("--force-remove-worktree a2ea --discard-unpushed c688@a2ea"),
+            Some(
+                [
+                    "--force-remove-worktree",
+                    "a2ea",
+                    "--discard-unpushed",
+                    "c688@a2ea"
+                ]
+                .map(String::from)
+                .to_vec()
+            )
+        );
+        assert_eq!(override_args("--force-remove-worktree"), None);
+        assert_eq!(override_args("--rm-rf /"), None);
+        assert_eq!(override_args("--force-remove-worktree ../x"), None);
+        assert_eq!(override_args(""), None);
+    }
+
+    #[test]
+    fn any_other_failure_flashes_the_last_stderr_line() {
+        assert_eq!(
+            rm_outcome(
+                close(&[]),
+                false,
+                "",
+                "couldn't remove 35d08c15 — the background service may be restarting. Try again in a moment.\n"
+            ),
+            Outcome::Failed(
+                "couldn't remove 35d08c15 — the background service may be restarting. Try again in a moment.".into()
+            )
+        );
+        assert_eq!(
+            rm_outcome(close(&[]), false, "", ""),
+            Outcome::Failed("claude rm 35d08c15 failed".into())
+        );
     }
 
     #[test]

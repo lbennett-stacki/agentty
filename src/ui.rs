@@ -86,6 +86,12 @@ pub enum Mode {
         choice: usize,
         options: Vec<GroupName>,
     },
+    /// Asked before deleting a group that still has sessions; `back` is the picker it came from.
+    DeleteGroup {
+        name: GroupName,
+        members: usize,
+        back: Box<Mode>,
+    },
     NewSession {
         accounts: Vec<ConfigDir>,
         choice: usize,
@@ -115,10 +121,17 @@ pub enum Key {
     Right,
     Tab,
     Backspace,
+    Delete,
     Space,
 }
 
 pub fn key_of(ev: &KeyEvent) -> Option<Key> {
+    if ev.kind == KeyEventKind::Press
+        && ev.code == KeyCode::Char('d')
+        && ev.modifiers == KeyModifiers::CONTROL
+    {
+        return Some(Key::Delete);
+    }
     if ev.kind != KeyEventKind::Press
         || ev
             .modifiers
@@ -137,6 +150,7 @@ pub fn key_of(ev: &KeyEvent) -> Option<Key> {
         KeyCode::Right => Key::Right,
         KeyCode::Tab => Key::Tab,
         KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
         _ => return None,
     })
 }
@@ -288,6 +302,31 @@ pub fn update(
                         })];
                     }
                 }
+                Key::Delete => {
+                    if let Some(name) = picks.get(choice).filter(|g| options.contains(g)).cloned() {
+                        let members = snap
+                            .rows
+                            .iter()
+                            .filter(|r| user_group(user, r) == Some(&name))
+                            .count();
+                        let back = Mode::Move {
+                            key: user_key,
+                            input,
+                            choice,
+                            options,
+                        };
+                        if members == 0 {
+                            app.mode = forget(back, &name);
+                            return vec![Effect::Commit(Op::DeleteGroup { name })];
+                        }
+                        app.mode = Mode::DeleteGroup {
+                            name,
+                            members,
+                            back: Box::new(back),
+                        };
+                        return vec![];
+                    }
+                }
                 Key::Up => choice = choice.saturating_sub(1),
                 Key::Down | Key::Tab => choice = (choice + 1).min(picks.len().saturating_sub(1)),
                 _ => {
@@ -303,6 +342,28 @@ pub fn update(
             };
             vec![]
         }
+        Mode::DeleteGroup {
+            name,
+            members,
+            back,
+        } => match key {
+            Key::Char('y') => {
+                app.mode = forget(*back, &name);
+                vec![Effect::Commit(Op::DeleteGroup { name })]
+            }
+            Key::Char('n') | Key::Esc => {
+                app.mode = *back;
+                vec![]
+            }
+            _ => {
+                app.mode = Mode::DeleteGroup {
+                    name,
+                    members,
+                    back,
+                };
+                vec![]
+            }
+        },
         Mode::NewSession {
             accounts,
             mut choice,
@@ -587,6 +648,28 @@ fn candidates(input: &str, options: &[GroupName]) -> Vec<GroupName> {
     out
 }
 
+/// The picker as it reads once `name` is gone.
+fn forget(picker: Mode, name: &GroupName) -> Mode {
+    match picker {
+        Mode::Move {
+            key,
+            input,
+            choice,
+            mut options,
+        } => {
+            options.retain(|g| g != name);
+            let last = candidates(&input, &options).len().saturating_sub(1);
+            Mode::Move {
+                key,
+                input,
+                choice: choice.min(last),
+                options,
+            }
+        }
+        other => other,
+    }
+}
+
 fn row_dir(key: &RowKey) -> &ConfigDir {
     match key {
         RowKey::Live { dir, .. } | RowKey::Exited { dir, .. } => dir,
@@ -804,6 +887,9 @@ pub fn render(frame: &mut Frame, app: &App, snap: &Snapshot, user: &UserState, n
             ..
         } => {
             render_picker(frame, body, input, *choice, options);
+        }
+        Mode::DeleteGroup { name, members, .. } => {
+            render_confirm_delete(frame, body, name, *members);
         }
         _ => {}
     }
@@ -1082,8 +1168,15 @@ fn footer(app: &App, now: At) -> TLine<'static> {
         Mode::Move { input, .. } => prompt(
             "group: ",
             input,
-            "↑/↓ choose  ⏎ move  - automatic  esc cancel",
+            "↑/↓ choose  ⏎ move  - automatic  ^d delete group  esc cancel",
         ),
+        Mode::DeleteGroup { name, .. } => TLine::from(vec![
+            Span::styled(
+                format!(" delete group \"{}\"?", name.0),
+                Style::new().fg(Color::Yellow),
+            ),
+            Span::styled("   y delete  n keep", dim()),
+        ]),
         Mode::NewSession {
             accounts,
             choice,
@@ -1586,6 +1679,7 @@ fn render_help(frame: &mut Frame, body: Rect, app: &App, snap: &Snapshot) {
                 ("n", "start a new one here"),
                 ("r", "label it"),
                 ("m", "move to a group"),
+                ("^d", "delete a group (in m)"),
             ],
         ),
         legend,
@@ -1721,6 +1815,34 @@ fn render_picker(frame: &mut Frame, body: Rect, input: &str, choice: usize, opti
         ),
         area,
     );
+}
+
+fn render_confirm_delete(frame: &mut Frame, body: Rect, name: &GroupName, members: usize) {
+    let text = vec![
+        TLine::from(format!(" \"{}\" still has {}.", name.0, sessions(members))),
+        TLine::from(" Deleting it moves them back to"),
+        TLine::from(" their automatic groups."),
+        TLine::raw(""),
+        TLine::from(Span::styled(" y delete   n keep", dim())),
+    ];
+    let area = centered(body, 40, text.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(text).block(
+            Block::bordered()
+                .title(" delete group ")
+                .border_style(Style::new().fg(Color::Yellow)),
+        ),
+        area,
+    );
+}
+
+fn sessions(n: usize) -> String {
+    if n == 1 {
+        "1 session".into()
+    } else {
+        format!("{n} sessions")
+    }
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -2503,6 +2625,57 @@ mod tests {
             []
         );
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn ctrl_d_in_the_picker_deletes_a_group_and_asks_first_when_sessions_are_in_it() {
+        let a = row("a", 1, Status::Working, 0, repo("r"));
+        let gone = row("gone", 9, Status::Working, 0, repo("r"));
+        let mut user = UserState::default();
+        move_to(&mut user, &a, "busy");
+        move_to(&mut user, &gone, "stale");
+        let s = snap(vec![a]);
+        let mut app = App::new(false);
+        let delete = |g: &str| {
+            vec![Effect::Commit(Op::DeleteGroup {
+                name: GroupName(g.into()),
+            })]
+        };
+        let options = |app: &App| match &app.mode {
+            Mode::Move { options, .. } => options.clone(),
+            m => panic!("not in the picker: {m:?}"),
+        };
+
+        let mut keys = vec![Key::Char('m')];
+        keys.extend(typed("stale"));
+        keys.push(Key::Delete);
+        assert_eq!(press(&mut app, &s, &user, &keys), delete("stale"));
+        assert_eq!(options(&app), vec![GroupName("busy".into())]);
+        press(&mut app, &s, &user, &[Key::Esc]);
+
+        let mut keys = vec![Key::Char('m')];
+        keys.extend(typed("busy"));
+        keys.extend([Key::Delete, Key::Char('x')]);
+        assert_eq!(press(&mut app, &s, &user, &keys), []);
+        assert!(matches!(app.mode, Mode::DeleteGroup { members: 1, .. }));
+        assert_eq!(press(&mut app, &s, &user, &[Key::Char('n')]), []);
+        assert_eq!(options(&app).len(), 2);
+        assert_eq!(
+            press(&mut app, &s, &user, &[Key::Delete, Key::Char('y')]),
+            delete("busy")
+        );
+        assert_eq!(options(&app), vec![GroupName("stale".into())]);
+    }
+
+    #[test]
+    fn ctrl_d_reads_as_delete_but_other_control_keys_stay_ignored() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        assert_eq!(key_of(&ctrl('d')), Some(Key::Delete));
+        assert_eq!(key_of(&ctrl('x')), None);
+        assert_eq!(
+            key_of(&KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            Some(Key::Delete)
+        );
     }
 
     #[test]

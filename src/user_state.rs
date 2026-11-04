@@ -40,6 +40,13 @@ impl UserState {
                 }
                 self.entries.entry(key.clone()).or_default().group = group.clone();
             }
+            Op::DeleteGroup { name } => {
+                for e in self.entries.values_mut() {
+                    if e.group.as_ref() == Some(name) {
+                        e.group = None;
+                    }
+                }
+            }
             Op::Anchor { session, anchor } => {
                 for e in self.entries.values_mut() {
                     if e.anchor.as_ref() == Some(anchor) {
@@ -69,9 +76,17 @@ impl UserState {
                 }
             }
         }
+        self.prune();
+        *self != before
+    }
+
+    /// Drop entries that hold nothing and groups that no entry is in.
+    fn prune(&mut self) {
         self.entries
             .retain(|_, e| e.label.is_some() || e.group.is_some());
-        *self != before
+        let entries = &self.entries;
+        self.groups
+            .retain(|g| entries.values().any(|e| e.group.as_ref() == Some(g)));
     }
 
     pub fn entry(&self, key: &UserKey) -> Option<&Entry> {
@@ -268,11 +283,13 @@ fn decode(text: &str) -> Result<UserState, Decode> {
             Some((UserKey::decode(&k)?, entry))
         })
         .collect();
-    Ok(UserState {
+    let mut state = UserState {
         groups: wire.groups.into_iter().map(GroupName).collect(),
         entries,
         local_skills: wire.local_skills.into_iter().collect(),
-    })
+    };
+    state.prune();
+    Ok(state)
 }
 
 fn encode(state: &UserState) -> String {
@@ -371,6 +388,9 @@ mod tests {
                 name: "verify".into(),
                 local: true,
             },
+            Op::DeleteGroup {
+                name: group("main"),
+            },
         ];
         for op in &ops {
             let mut once = base.clone();
@@ -398,6 +418,56 @@ mod tests {
         });
         assert_eq!(s.groups, vec![group("x"), group("y")]);
         assert_eq!(s.group_order(&group("y")), Some(1));
+    }
+
+    #[test]
+    fn deleting_a_group_ungroups_its_sessions_and_keeps_their_labels() {
+        let mut s = UserState::default();
+        s.apply(&label(skey("a"), "arch"));
+        for k in ["a", "b"] {
+            s.apply(&Op::SetGroup {
+                key: skey(k),
+                group: Some(group("x")),
+            });
+        }
+        s.apply(&Op::SetGroup {
+            key: skey("c"),
+            group: Some(group("y")),
+        });
+        assert!(s.apply(&Op::DeleteGroup { name: group("x") }));
+        assert_eq!(s.groups, vec![group("y")]);
+        assert_eq!(s.entry(&skey("a")).unwrap().group, None);
+        assert_eq!(s.entry(&skey("a")).unwrap().label.as_deref(), Some("arch"));
+        assert_eq!(s.entry(&skey("b")), None);
+        assert_eq!(s.entry(&skey("c")).unwrap().group, Some(group("y")));
+    }
+
+    #[test]
+    fn a_group_goes_once_its_last_session_leaves() {
+        let mut s = UserState::default();
+        for (k, g) in [("a", "x"), ("b", "x"), ("c", "y")] {
+            s.apply(&Op::SetGroup {
+                key: skey(k),
+                group: Some(group(g)),
+            });
+        }
+        s.apply(&Op::SetGroup {
+            key: skey("a"),
+            group: Some(group("y")),
+        });
+        assert_eq!(s.groups, vec![group("x"), group("y")]);
+        s.apply(&Op::SetGroup {
+            key: skey("b"),
+            group: None,
+        });
+        assert_eq!(s.groups, vec![group("y")]);
+    }
+
+    #[test]
+    fn a_file_with_an_empty_group_loads_without_it() {
+        let text =
+            "version = 1\ngroups = [\"gone\", \"kept\"]\n\n[entries.\"sid:a\"]\ngroup = \"kept\"\n";
+        assert_eq!(decode(text).unwrap().groups, vec![group("kept")]);
     }
 
     #[test]

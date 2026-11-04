@@ -653,6 +653,10 @@ pub enum Op {
         key: UserKey,
         group: Option<GroupName>,
     },
+    /// Forget a group and send its sessions back to their automatic groups.
+    DeleteGroup {
+        name: GroupName,
+    },
     Anchor {
         session: SessionId,
         anchor: Anchor,

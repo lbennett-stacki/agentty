@@ -71,7 +71,7 @@ Rows group by your own groups first, then by team, then by git repository (workt
 | Enter | open the session: switch to its tmux pane, or, for a bg job, run `claude attach <job>` right here in agentty's place. Ctrl+Z detaches and brings agentty back (← opens Claude Code's own agent view instead). Attaching works outside tmux too. |
 | tab, `p` | show the details pane |
 | `r` | set a label (an empty label clears it) |
-| `m` | move to a group. Type a new name to create a group, or `-` to return the row to its automatic group. |
+| `m` | move to a group. Type a new name to create a group, or `-` to return the row to its automatic group. Ctrl+D (or Delete) deletes the highlighted group, asking first if sessions are still in it; they return to their automatic groups. A group also disappears by itself once no session is in it. |
 | `n` | start a new background `claude` (`claude --bg`) in the selected row's directory and group, and attach to it here. Ctrl+Z comes back. In a workspace it starts on the workspace account with the most usage left, and tab picks another. |
 | `w` | show the next workspace, then all sessions |
 | `s` | show the skills view: which skills each account has, and which are missing or copied (see [Skills across accounts](#skills-across-accounts)). `s` or Esc goes back. |

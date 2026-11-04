@@ -15,7 +15,7 @@ A tmux dashboard that lists every live Claude Code session on this machine and s
  agentty ──────────────────────── 2  │
  ? your turn  Dashboard design       │      prs #4812  #4790
  ○ idle       Fee rounding           │
- ⏎ open   tab details   l agents   n new   r label   m move   s skills   / filter   ? help
+ ⏎ open   tab details   l agents   n new   x close   r label   m move   s skills   / filter   ? help
 ```
 
 The list shows each session's status and name. tab opens the details pane beside it, which holds everything else.
@@ -73,11 +73,25 @@ Rows group by your own groups first, then by team, then by git repository (workt
 | `r` | set a label (an empty label clears it) |
 | `m` | move to a group. Type a new name to create a group, or `-` to return the row to its automatic group. |
 | `n` | start a new background `claude` (`claude --bg`) in the selected row's directory and group, and attach to it here. Ctrl+Z comes back. In a workspace it starts on the workspace account with the most usage left, and tab picks another. |
+| `x`, Ctrl+X | close a background session, as Ctrl+X does in `claude agents` (see [Closing a session](#closing-a-session)) |
 | `w` | show the next workspace, then all sessions |
 | `s` | show the skills view: which skills each account has, and which are missing or copied (see [Skills across accounts](#skills-across-accounts)). `s` or Esc goes back. |
 | `/` | filter |
 | `?` | help and diagnostics |
 | `q`, Esc | quit |
+
+## Closing a session
+
+`x` (or Ctrl+X) on a bg job asks first, then runs `claude rm <job>`, the command behind Ctrl+X in `claude agents`. It stops the session along with its background agents, shells and monitors, deletes its job state, and removes its worktree. The transcript stays, so `claude --resume` can still open the conversation. `x` also clears an ended job from the finished group. It cannot close an interactive session, because that session belongs to the terminal it runs in, so exit it there.
+
+`claude rm` will not delete a worktree that could hold work you would lose. The session stops and stays in the list as ended, and agentty shows why it was kept:
+
+- **Unpushed commits.** agentty offers the discard that `claude rm` offers: `x` deletes the worktree and its commits, and Esc keeps them. Push the commits first if you want them.
+- **Uncommitted changes.** `claude rm` has no discard for these. Commit or stash them and press `x` again, or press Ctrl+X twice in `claude agents`.
+- **The worktree is in use.** Another running session claims it, works in it, or holds a lock on it. Stop that session, then press `x` again.
+- **A WorktreeRemove hook or git failed.** agentty offers the forced removal that `claude rm` offers.
+
+This is why a session you delete in `claude agents` can come back marked as not deleted. The same check runs there, and the session stays until its worktree is gone.
 
 ## Workspaces and accounts
 

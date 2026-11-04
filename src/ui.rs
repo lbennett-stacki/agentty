@@ -6,15 +6,15 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TLine, Span};
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::{Config, Workspace};
 use crate::derive::roomiest;
 use crate::model::{
-    At, AutoGroup, ConfigDir, Cost, Ctx, Effect, GroupId, GroupName, NodeKind, NodeState, Op,
-    OpenTarget, Outcome, Problem, Rank, Row, RowKey, SafeText, Snapshot, Status, TaskId, Tree,
+    At, AutoGroup, Close, ConfigDir, Cost, Ctx, Effect, GroupId, GroupName, NodeKind, NodeState,
+    Op, OpenTarget, Outcome, Problem, Rank, Row, RowKey, SafeText, Snapshot, Status, TaskId, Tree,
     UserKey, Window, row_order,
 };
 use crate::prs::Prs;
@@ -25,6 +25,8 @@ mod skills_view;
 use skills_view::SkillsView;
 
 const FLASH_MS: i64 = 4000;
+/// Long enough to read why `claude rm` kept a session, and what to do about it.
+const KEPT_FLASH_MS: i64 = 15000;
 /// The list's width when the details pane sits beside it.
 const LIST_WIDTH: u16 = 56;
 /// The selected row's background, from the 256-colour palette so it follows the terminal theme.
@@ -95,6 +97,12 @@ pub enum Mode {
         /// The first prompt, for an agent started from the skills view.
         prompt: Option<String>,
     },
+    /// Asks before closing. `kept` holds why the last try kept the session, when it offered an
+    /// override.
+    Close {
+        close: Close,
+        kept: Option<String>,
+    },
     Help,
 }
 
@@ -116,9 +124,17 @@ pub enum Key {
     Tab,
     Backspace,
     Space,
+    /// Closes a session, as in Claude Code's agent view.
+    CtrlX,
 }
 
 pub fn key_of(ev: &KeyEvent) -> Option<Key> {
+    if ev.kind == KeyEventKind::Press
+        && ev.modifiers == KeyModifiers::CONTROL
+        && ev.code == KeyCode::Char('x')
+    {
+        return Some(Key::CtrlX);
+    }
     if ev.kind != KeyEventKind::Press
         || ev
             .modifiers
@@ -207,9 +223,13 @@ impl App {
     }
 
     fn flash(&mut self, text: String, now: At) {
+        self.flash_for(text, now, FLASH_MS);
+    }
+
+    fn flash_for(&mut self, text: String, now: At, ms: i64) {
         self.flash = Some(Flash {
             text,
-            until: At(now.0 + FLASH_MS),
+            until: At(now.0 + ms),
         });
     }
 }
@@ -336,6 +356,10 @@ pub fn update(
                 vec![]
             }
         },
+        Mode::Close { close, .. } => match key {
+            Key::Char('x') | Key::CtrlX | Key::Enter => vec![Effect::Close(close)],
+            _ => vec![],
+        },
         Mode::Help => vec![],
     }
 }
@@ -388,6 +412,11 @@ fn normal(
             }
         }
         Key::Tab | Key::Char('p') => app.detail = !app.detail,
+        Key::Char('x') | Key::CtrlX => {
+            if let Some(r) = row {
+                close(app, user, r, now);
+            }
+        }
         Key::Char('r') => {
             if let Some(r) = row {
                 let input = user
@@ -482,6 +511,35 @@ fn normal(
     vec![]
 }
 
+/// Only bg jobs can be closed: `claude rm` takes a job id, and an interactive session belongs to
+/// the terminal it runs in.
+fn close(app: &mut App, user: &UserState, row: &Row, now: At) {
+    let job = match &row.key {
+        RowKey::Exited { job, .. } => Some(job),
+        RowKey::Live { .. } => row.detail.job_id.as_ref(),
+    };
+    let Some(job) = job else {
+        app.flash(
+            "x closes background sessions only: exit this one where it runs".into(),
+            now,
+        );
+        return;
+    };
+    let name = user
+        .entry(&row.user_key)
+        .and_then(|e| e.label.clone())
+        .unwrap_or_else(|| row.title.as_str().to_owned());
+    app.mode = Mode::Close {
+        close: Close {
+            dir: row_dir(&row.key).clone(),
+            job: job.clone(),
+            name,
+            discard: Vec::new(),
+        },
+        kept: None,
+    };
+}
+
 fn on_outcome(app: &mut App, outcome: Outcome, now: At) -> Vec<Effect> {
     let quit = app.popup.then_some(Effect::Quit);
     match outcome {
@@ -509,6 +567,25 @@ fn on_outcome(app: &mut App, outcome: Outcome, now: At) -> Vec<Effect> {
             None => vec![],
         },
         Outcome::Committed => vec![],
+        Outcome::Closed(name) => {
+            app.flash(format!("closed {name}"), now);
+            vec![]
+        }
+        Outcome::Kept { close, what, next } => {
+            if close.discard.is_empty() {
+                app.flash_for(
+                    format!("kept {}: {what} To close it, {next}.", close.name),
+                    now,
+                    KEPT_FLASH_MS,
+                );
+            } else {
+                app.mode = Mode::Close {
+                    kept: Some(format!("kept {}: {what}", close.name)),
+                    close,
+                };
+            }
+            vec![]
+        }
         Outcome::Failed(msg) => {
             app.flash(msg, now);
             vec![]
@@ -755,10 +832,16 @@ fn flatten(out: &mut Vec<Line>, row: &RowKey, tree: &Tree, indent: &str) {
 pub fn render(frame: &mut Frame, app: &App, snap: &Snapshot, user: &UserState, now: At) {
     let lines = layout(snap, user, app);
     let sel = selected(&lines, app);
+    let (foot_line, wraps) = footer(app, now);
+    let foot_height = if wraps {
+        footer_height(&foot_line, frame.area().width)
+    } else {
+        1
+    };
     let [top, body, foot] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(foot_height),
     ])
     .areas(frame.area());
     frame.render_widget(Paragraph::new(header(app, snap, now, top.width)), top);
@@ -793,7 +876,7 @@ pub fn render(frame: &mut Frame, app: &App, snap: &Snapshot, user: &UserState, n
         }
         render_list(frame, list_area, &lines, sel);
     }
-    frame.render_widget(Paragraph::new(footer(app, now)), foot);
+    frame.render_widget(Paragraph::new(foot_line).wrap(Wrap { trim: false }), foot);
 
     match &app.mode {
         Mode::Help => render_help(frame, body, app, snap),
@@ -1038,7 +1121,20 @@ fn limits_pct(w: Window, now: At) -> Span<'static> {
     }
 }
 
-fn footer(app: &App, now: At) -> TLine<'static> {
+/// A long message, such as why `claude rm` kept a session, wraps onto up to three lines.
+fn footer_height(line: &TLine, width: u16) -> u16 {
+    let lines = line.width().div_ceil(usize::from(width.max(1)));
+    u16::try_from(lines).unwrap_or(u16::MAX).clamp(1, 3)
+}
+
+/// The footer, and whether it is a message that may wrap. Key hints and prompts keep to one line.
+fn footer(app: &App, now: At) -> (TLine<'static>, bool) {
+    let message = matches!(&app.mode, Mode::Close { .. })
+        || (app.mode == Mode::Normal && app.flash.as_ref().is_some_and(|f| f.until > now));
+    (footer_line(app, now), message)
+}
+
+fn footer_line(app: &App, now: At) -> TLine<'static> {
     let prompt = |label: &str, input: &str, hint: &str| {
         TLine::from(vec![
             Span::raw(format!(" {label}{input}")),
@@ -1058,6 +1154,7 @@ fn footer(app: &App, now: At) -> TLine<'static> {
                 ("tab", "details"),
                 ("l", "agents"),
                 ("n", "new"),
+                ("x", "close"),
                 ("r", "label"),
                 ("m", "move"),
                 ("s", "skills"),
@@ -1069,6 +1166,7 @@ fn footer(app: &App, now: At) -> TLine<'static> {
                 ("tab", "details"),
                 ("l", "agents"),
                 ("n", "new"),
+                ("x", "close"),
                 ("r", "label"),
                 ("m", "move"),
                 ("w", "workspace"),
@@ -1103,6 +1201,22 @@ fn footer(app: &App, now: At) -> TLine<'static> {
                 "⏎ launch  esc cancel"
             },
         ),
+        Mode::Close { close, kept: None } => TLine::from(vec![
+            Span::styled(
+                format!(" close {}?", close.name),
+                Style::new().fg(Color::Yellow),
+            ),
+            Span::styled(
+                "  stops it and its agents and shells, and removes its worktree unless that would lose work   x close  esc cancel",
+                dim(),
+            ),
+        ]),
+        Mode::Close {
+            kept: Some(why), ..
+        } => TLine::from(vec![
+            Span::styled(format!(" {why}"), Style::new().fg(Color::Yellow)),
+            Span::styled("   x discard it and close  esc keep", dim()),
+        ]),
         Mode::Help => TLine::from(Span::styled(" any key closes help", dim())),
     }
 }
@@ -1584,6 +1698,7 @@ fn render_help(frame: &mut Frame, body: Rect, app: &App, snap: &Snapshot) {
                 ("tab", "details"),
                 ("l h", "show or hide its agents"),
                 ("n", "start a new one here"),
+                ("x", "close it (^X works too)"),
                 ("r", "label it"),
                 ("m", "move to a group"),
             ],
@@ -2259,6 +2374,147 @@ mod tests {
                 job: JobId("0a1b2c3d".into()),
             }]
         );
+    }
+
+    fn bg_row() -> (Row, Close) {
+        let mut r = row("bg", 1, Status::Working, 0, repo("r"));
+        r.detail.job_id = Some(JobId("0a1b2c3d".into()));
+        let close = Close {
+            dir: ConfigDir("/h/.claude".into()),
+            job: JobId("0a1b2c3d".into()),
+            name: "bg".into(),
+            discard: vec![],
+        };
+        (r, close)
+    }
+
+    #[test]
+    fn x_asks_then_closes_the_bg_job_and_anything_else_cancels() {
+        let (r, close) = bg_row();
+        let s = snap(vec![r]);
+        let user = UserState::default();
+        let mut app = App::new(false);
+        assert_eq!(press(&mut app, &s, &user, &[Key::Char('x')]), []);
+        assert!(dump(&app, &s, &user, NOW, 160).contains("close bg?"));
+        assert_eq!(
+            press(&mut app, &s, &user, &[Key::Char('x')]),
+            [Effect::Close(close.clone())]
+        );
+        assert_eq!(press(&mut app, &s, &user, &[Key::CtrlX, Key::Esc]), []);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            press(&mut app, &s, &user, &[Key::CtrlX, Key::Enter]),
+            [Effect::Close(close)]
+        );
+    }
+
+    #[test]
+    fn ctrl_x_is_its_own_key_and_other_control_chords_stay_ignored() {
+        let ev = |code, modifiers| KeyEvent::new(code, modifiers);
+        assert_eq!(
+            key_of(&ev(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            Some(Key::CtrlX)
+        );
+        assert_eq!(key_of(&ev(KeyCode::Char('y'), KeyModifiers::CONTROL)), None);
+        assert_eq!(
+            key_of(&ev(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Some(Key::Char('x'))
+        );
+    }
+
+    #[test]
+    fn an_ended_job_closes_under_its_label() {
+        let (mut r, mut close) = bg_row();
+        r.detail.job_id = None;
+        r.key = RowKey::Exited {
+            dir: close.dir.clone(),
+            job: close.job.clone(),
+        };
+        let mut user = UserState::default();
+        label(&mut user, &r, "my label");
+        close.name = "my label".into();
+        let s = snap(vec![r]);
+        assert_eq!(
+            press(
+                &mut App::new(false),
+                &s,
+                &user,
+                &[Key::Char('x'), Key::Char('x')]
+            ),
+            [Effect::Close(close)]
+        );
+    }
+
+    #[test]
+    fn x_on_an_interactive_session_only_says_why() {
+        let s = snap(vec![pane_row()]);
+        let user = UserState::default();
+        let mut app = App::new(false);
+        assert_eq!(press(&mut app, &s, &user, &[Key::Char('x')]), []);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(dump(&app, &s, &user, NOW, 160).contains("background sessions only"));
+    }
+
+    #[test]
+    fn a_refusal_with_an_override_asks_to_discard_and_x_passes_the_override() {
+        let (r, close) = bg_row();
+        let s = snap(vec![r]);
+        let user = UserState::default();
+        let mut app = App::new(false);
+        let offered = Close {
+            discard: vec!["--discard-unpushed".into(), "c688@a2ea".into()],
+            ..close
+        };
+        let kept = Outcome::Kept {
+            close: offered.clone(),
+            what: "1 unpushed commit on “b”. It exists on no remote.".into(),
+            next: "push it and press x again, or discard the worktree and its commits".into(),
+        };
+        assert_eq!(update(&mut app, &s, &user, Input::Done(kept), NOW), []);
+        let screen = dump(&app, &s, &user, NOW, 160);
+        assert!(screen.contains("kept bg: 1 unpushed commit"), "{screen}");
+        assert!(screen.contains("x discard it and close"), "{screen}");
+        assert_eq!(
+            press(&mut app, &s, &user, &[Key::Char('x')]),
+            [Effect::Close(offered)]
+        );
+    }
+
+    #[test]
+    fn a_refusal_without_an_override_flashes_what_to_do_across_lines() {
+        let (r, close) = bg_row();
+        let s = snap(vec![r]);
+        let user = UserState::default();
+        let mut app = App::new(false);
+        let kept = Outcome::Kept {
+            close,
+            what: "The worktree has uncommitted changes. Deleting it would lose them.".into(),
+            next: "commit or stash them and press x again".into(),
+        };
+        update(&mut app, &s, &user, Input::Done(kept), NOW);
+        assert_eq!(app.mode, Mode::Normal);
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(60, 12)).unwrap();
+        term.draw(|f| render(f, &app, &s, &user, NOW)).unwrap();
+        let screen = buffer_text(term.backend().buffer()).replace('\n', " ");
+        assert!(screen.contains("press x again."), "{screen}");
+        let later = At(NOW.0 + FLASH_MS + 1);
+        assert!(dump(&app, &s, &user, later, 160).contains("uncommitted changes"));
+    }
+
+    #[test]
+    fn closing_flashes_the_name() {
+        let s = snap(vec![]);
+        let user = UserState::default();
+        let mut app = App::new(true);
+        let fx = update(
+            &mut app,
+            &s,
+            &user,
+            Input::Done(Outcome::Closed("bg".into())),
+            NOW,
+        );
+        assert_eq!(fx, [], "the popup stays open");
+        assert!(dump(&app, &s, &user, NOW, 160).contains("closed bg"));
     }
 
     #[test]

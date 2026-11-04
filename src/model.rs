@@ -682,9 +682,23 @@ pub enum Effect {
         name: Option<String>,
         prompt: Option<String>,
     },
+    /// `claude rm`, which Claude Code's agent view runs on ctrl+x.
+    Close(Close),
     ScanSkills(Vec<ConfigDir>),
     Commit(Op),
     Quit,
+}
+
+/// Closing a bg job: stop it with its agents and shells, delete its job state, and remove its
+/// worktree when nothing would be lost.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Close {
+    pub dir: ConfigDir,
+    pub job: JobId,
+    pub name: String,
+    /// The `--discard-unpushed` or `--force-remove-worktree` arguments that a refusal offered.
+    /// Empty on the first try.
+    pub discard: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -698,6 +712,14 @@ pub enum Outcome {
     },
     Committed,
     Skills(Inventory),
+    Closed(String),
+    /// `claude rm` stopped the job but kept it, because removing its worktree could lose work.
+    /// `close.discard` holds the arguments that override the refusal, when Claude Code offers one.
+    Kept {
+        close: Close,
+        what: String,
+        next: String,
+    },
     Failed(String),
 }
 

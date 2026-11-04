@@ -13,9 +13,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::config::{Config, Workspace};
 use crate::derive::roomiest;
 use crate::model::{
-    At, AutoGroup, Close, ConfigDir, Cost, Ctx, Effect, GroupId, GroupName, NodeKind, NodeState,
-    Op, OpenTarget, Outcome, Problem, Rank, Row, RowKey, SafeText, Snapshot, Status, TaskId, Tree,
-    UserKey, Window, row_order,
+    At, AutoGroup, Close, ConfigDir, Cost, Ctx, Effect, GroupId, GroupName, JobId, NodeKind,
+    NodeState, Op, OpenTarget, Outcome, Problem, Rank, Row, RowKey, SafeText, Snapshot, Status,
+    TaskId, Tree, UserKey, Window, row_order,
 };
 use crate::prs::Prs;
 use crate::skills::Inventory;
@@ -47,6 +47,8 @@ pub struct App {
     scope: Scope,
     /// The skills view, on screen in place of the session list while `Some`.
     skills: Option<SkillsView>,
+    /// Jobs whose `claude rm` is still running. Their rows show as deleting.
+    closing: HashSet<JobId>,
 }
 
 #[derive(Debug, Default)]
@@ -185,6 +187,7 @@ impl App {
             flash: None,
             scope: Scope::default(),
             skills: None,
+            closing: HashSet::new(),
         }
     }
 
@@ -216,6 +219,18 @@ impl App {
             self.scope.cwd.clone()
         } else {
             w.root.clone()
+        }
+    }
+
+    fn deleting(&self, row: &Row) -> bool {
+        row_job(row).is_some_and(|j| self.closing.contains(j))
+    }
+
+    fn look(&self, row: &Row) -> Look {
+        if self.deleting(row) {
+            Look::Deleting
+        } else {
+            Look::of(&row.status)
         }
     }
 
@@ -413,7 +428,10 @@ pub fn update(
             }
         },
         Mode::Close { close, .. } => match key {
-            Key::Char('x') | Key::CtrlX | Key::Enter => vec![Effect::Close(close)],
+            Key::Char('x') | Key::CtrlX | Key::Enter => {
+                app.closing.insert(close.job.clone());
+                vec![Effect::Close(close)]
+            }
             _ => vec![],
         },
         Mode::Help => vec![],
@@ -567,14 +585,18 @@ fn normal(
     vec![]
 }
 
+/// The bg job behind a row. Interactive sessions have none.
+fn row_job(row: &Row) -> Option<&JobId> {
+    match &row.key {
+        RowKey::Exited { job, .. } => Some(job),
+        RowKey::Live { .. } => row.detail.job_id.as_ref(),
+    }
+}
+
 /// Only bg jobs can be closed: `claude rm` takes a job id, and an interactive session belongs to
 /// the terminal it runs in.
 fn close(app: &mut App, user: &UserState, row: &Row, now: At) {
-    let job = match &row.key {
-        RowKey::Exited { job, .. } => Some(job),
-        RowKey::Live { .. } => row.detail.job_id.as_ref(),
-    };
-    let Some(job) = job else {
+    let Some(job) = row_job(row) else {
         app.flash(
             "x closes background sessions only: exit this one where it runs".into(),
             now,
@@ -585,6 +607,10 @@ fn close(app: &mut App, user: &UserState, row: &Row, now: At) {
         .entry(&row.user_key)
         .and_then(|e| e.label.clone())
         .unwrap_or_else(|| row.title.as_str().to_owned());
+    if app.closing.contains(job) {
+        app.flash(format!("already deleting {name}"), now);
+        return;
+    }
     app.mode = Mode::Close {
         close: Close {
             dir: row_dir(&row.key).clone(),
@@ -623,12 +649,25 @@ fn on_outcome(app: &mut App, outcome: Outcome, now: At) -> Vec<Effect> {
             None => vec![],
         },
         Outcome::Committed => vec![],
-        Outcome::Closed(name) => {
-            app.flash(format!("closed {name}"), now);
+        Outcome::Closed(close) => {
+            app.closing.remove(&close.job);
+            app.flash(format!("closed {}", close.name), now);
+            vec![]
+        }
+        Outcome::CloseFailed { close, msg } => {
+            app.closing.remove(&close.job);
+            app.flash_for(
+                format!("could not close {}: {msg}", close.name),
+                now,
+                KEPT_FLASH_MS,
+            );
             vec![]
         }
         Outcome::Kept { close, what, next } => {
-            if close.discard.is_empty() {
+            app.closing.remove(&close.job);
+            // Only prompt over the plain list: the answer arrives late, and must not clobber a
+            // prompt the user has since opened.
+            if close.discard.is_empty() || app.mode != Mode::Normal {
                 app.flash_for(
                     format!("kept {}: {what} To close it, {next}.", close.name),
                     now,
@@ -762,7 +801,7 @@ pub enum Line {
     },
     Row {
         key: RowKey,
-        status: Status,
+        look: Look,
         label: Option<String>,
         title: SafeText,
         expanded: bool,
@@ -824,7 +863,7 @@ pub fn layout(snap: &Snapshot, user: &UserState, app: &App) -> Vec<Line> {
             let expanded = !row.tree.is_empty() && app.expanded.contains(&row.key);
             out.push(Line::Row {
                 key: row.key.clone(),
-                status: row.status.clone(),
+                look: app.look(row),
                 label: label(row),
                 title: row.title.clone(),
                 expanded,
@@ -947,6 +986,7 @@ pub fn render(frame: &mut Frame, app: &App, snap: &Snapshot, user: &UserState, n
                 frame,
                 pane,
                 row,
+                app.look(row),
                 label,
                 if wide { Borders::LEFT } else { Borders::TOP },
                 now,
@@ -1023,16 +1063,19 @@ fn dim() -> Style {
 
 /// How a status looks everywhere it shows: list, details and the help legend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Look {
+pub enum Look {
     NeedsYou,
     YourTurn,
     Working,
     Waiting,
     Idle,
     Ended,
+    /// `claude rm` is running on it.
+    Deleting,
 }
 
 impl Look {
+    /// The legend's marks. `Deleting` lasts only while `claude rm` runs, so it is left out.
     const ALL: [Look; 6] = [
         Look::NeedsYou,
         Look::YourTurn,
@@ -1065,6 +1108,7 @@ impl Look {
             Look::Waiting => "◐",
             Look::Idle => "○",
             Look::Ended => "·",
+            Look::Deleting => "×",
         }
     }
 
@@ -1076,6 +1120,7 @@ impl Look {
             Look::Waiting => "waiting",
             Look::Idle => "idle",
             Look::Ended => "ended",
+            Look::Deleting => "deleting…",
         }
     }
 
@@ -1087,6 +1132,7 @@ impl Look {
             Look::Waiting => "turn over, background work out",
             Look::Idle => "nothing in flight",
             Look::Ended => "bg job ended in the last day",
+            Look::Deleting => "claude rm still running",
         }
     }
 
@@ -1098,6 +1144,7 @@ impl Look {
             Look::Waiting => Style::new().fg(Color::Cyan),
             Look::Idle => Style::new(),
             Look::Ended => dim(),
+            Look::Deleting => Style::new().fg(Color::Magenta),
         }
     }
 
@@ -1365,15 +1412,12 @@ fn draw_line(line: &Line, selected: bool, width: usize) -> TLine<'static> {
             TLine::from(spans)
         }
         Line::Row {
-            status,
-            label,
-            title,
-            ..
+            look, label, title, ..
         } => {
-            let look = Look::of(status);
+            let look = *look;
             let name = match (selected, look) {
                 (true, _) => bold,
-                (false, Look::Ended) => dim(),
+                (false, Look::Ended | Look::Deleting) => dim(),
                 (false, _) => Style::new(),
             };
             let mut spans = vec![Span::raw(" "), look.label()];
@@ -1570,6 +1614,7 @@ fn render_detail(
     frame: &mut Frame,
     area: Rect,
     row: &Row,
+    look: Look,
     label: Option<&str>,
     border: Borders,
     now: At,
@@ -1584,7 +1629,6 @@ fn render_detail(
     let width = usize::from(inner.width);
     let text_w = width.saturating_sub(KEY + 1);
     let d = &row.detail;
-    let look = Look::of(&row.status);
     let bold = Style::new().add_modifier(Modifier::BOLD);
 
     let mut out = vec![spread(
@@ -2517,6 +2561,7 @@ mod tests {
             press(&mut app, &s, &user, &[Key::Char('x')]),
             [Effect::Close(close.clone())]
         );
+        let mut app = App::new(false);
         assert_eq!(press(&mut app, &s, &user, &[Key::CtrlX, Key::Esc]), []);
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(
@@ -2620,6 +2665,7 @@ mod tests {
 
     #[test]
     fn closing_flashes_the_name() {
+        let (_, close) = bg_row();
         let s = snap(vec![]);
         let user = UserState::default();
         let mut app = App::new(true);
@@ -2627,11 +2673,65 @@ mod tests {
             &mut app,
             &s,
             &user,
-            Input::Done(Outcome::Closed("bg".into())),
+            Input::Done(Outcome::Closed(close)),
             NOW,
         );
         assert_eq!(fx, [], "the popup stays open");
         assert!(dump(&app, &s, &user, NOW, 160).contains("closed bg"));
+    }
+
+    #[test]
+    fn a_closing_job_shows_as_deleting_until_claude_rm_answers() {
+        let (r, close) = bg_row();
+        let s = snap(vec![r]);
+        let user = UserState::default();
+        let mut app = App::new(false);
+        press(&mut app, &s, &user, &[Key::Char('x'), Key::Char('x')]);
+        assert_eq!(app.mode, Mode::Normal, "the list stays usable");
+        assert!(dump(&app, &s, &user, NOW, 160).contains("× deleting…"));
+        assert_eq!(
+            press(&mut app, &s, &user, &[Key::Char('x')]),
+            [],
+            "a second x does not run claude rm again"
+        );
+        assert!(dump(&app, &s, &user, NOW, 160).contains("already deleting bg"));
+
+        let failed = Outcome::CloseFailed {
+            close,
+            msg: "the background service may be restarting".into(),
+        };
+        update(&mut app, &s, &user, Input::Done(failed), NOW);
+        let screen = dump(&app, &s, &user, NOW, 160);
+        assert!(!screen.contains("deleting…"), "{screen}");
+        assert!(
+            screen.contains("could not close bg: the background service may be restarting"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_late_refusal_does_not_replace_an_open_prompt() {
+        let (r, close) = bg_row();
+        let s = snap(vec![r]);
+        let user = UserState::default();
+        let mut app = App::new(false);
+        press(
+            &mut app,
+            &s,
+            &user,
+            &[Key::Char('x'), Key::Char('x'), Key::Char('/')],
+        );
+        let kept = Outcome::Kept {
+            close: Close {
+                discard: vec!["--discard-unpushed".into(), "c688@a2ea".into()],
+                ..close
+            },
+            what: "1 unpushed commit.".into(),
+            next: "push it and press x again".into(),
+        };
+        update(&mut app, &s, &user, Input::Done(kept), NOW);
+        assert!(matches!(app.mode, Mode::Filter { .. }));
+        assert!(app.closing.is_empty());
     }
 
     #[test]
